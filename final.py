@@ -864,66 +864,17 @@ def main():
 
 
 
-
-
-
-
-
-def fetch_latest_data():
-    """
-    Fetch the latest real-time data for all tickers.
-    """
-    end_date = datetime.now()
-    start_date = end_date - timedelta(minutes=5)  # Fetch data for the last 5 minutes
-
-    latest_data = []
-    for ticker in TICKERS:
-        url = BASE_URL.format(
-            ticker=ticker,
-            multiplier=1,
-            timespan='minute',
-            from_date=start_date.strftime('%Y-%m-%dT%H:%M:%S'),
-            to_date=end_date.strftime('%Y-%m-%dT%H:%M:%S')
-        )
-        params = {
-            'adjusted': 'true',
-            'sort': 'asc',
-            'limit': '5000',
-            'apiKey': API_KEY
-        }
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            data = response.json().get('results', [])
-            for record in data:
-                record['ticker'] = ticker
-            latest_data.extend(data)
-        else:
-            print(f"Error fetching data for {ticker}: {response.status_code} - {response.text}")
-
-    # Convert to DataFrame
-    if latest_data:
-        df = pd.DataFrame(latest_data)
-        df['t'] = pd.to_datetime(df['t'], unit='ms')  # Convert timestamp
-        return df
-    else:
-        raise ValueError("No data fetched for tickers.")
-
 def preprocess_and_predict():
     """
     Fetch latest data, preprocess it, and use the model to make predictions.
     """
     # Step 1: Fetch latest data
     print("Fetching latest data...")
-    latest_data = fetch_latest_data()
-    print(f"Fetched {len(latest_data)} records.")
+    collect("2024-12-01", "2024-12-09")
 
     # Step 2: Preprocess the data
     print("Preprocessing the data...")
-    preprocessor = CryptoDataPreprocessor(
-        raw_data_dir=None,  # Not needed for real-time data
-        preprocessed_data_dir=None  # Not needed for real-time data
-    )
-    preprocessed_data, _ = preprocessor.preprocess_file(latest_data)
+    preprocess()
 
     # Step 3: Load the trained model
     print("Loading the model...")
