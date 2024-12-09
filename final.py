@@ -838,7 +838,7 @@ def preprocess_and_predict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Step 1: Fetch latest data
     print("Fetching latest data...")
-    collect("2024-12-01", "2024-12-09")
+    collect("2024-09-01", "2024-11-02")
 
     # Step 2: Preprocess the data
     print("Preprocessing the data...")
