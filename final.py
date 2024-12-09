@@ -335,45 +335,50 @@ class CryptoDataPreprocessor:
 
     def preprocess_all_files(self):
     # Traverse the raw_data_dir
-      for ticker in tqdm(os.listdir(self.raw_data_dir), desc='Processing Tickers'):
-          ticker_raw_dir = os.path.join(self.raw_data_dir, ticker)
-          ticker_preprocessed_dir = os.path.join(self.preprocessed_data_dir, ticker)
-          os.makedirs(ticker_preprocessed_dir, exist_ok=True)
+    for ticker in tqdm(os.listdir(self.raw_data_dir), desc='Processing Tickers'):
+        ticker_raw_dir = os.path.join(self.raw_data_dir, ticker)
+        ticker_preprocessed_dir = os.path.join(self.preprocessed_data_dir, ticker)
+        
+        # Create or clean the preprocessed directory
+        if os.path.exists(ticker_preprocessed_dir):
+            # Remove all existing files in the preprocessed directory
+            for old_file in os.listdir(ticker_preprocessed_dir):
+                old_file_path = os.path.join(ticker_preprocessed_dir, old_file)
+                os.remove(old_file_path)
+        else:
+            os.makedirs(ticker_preprocessed_dir, exist_ok=True)
 
-          for file in tqdm(os.listdir(ticker_raw_dir), desc=f'Processing {ticker}', leave=False):
-              if file.endswith('.csv'):
-                  raw_filepath = os.path.join(ticker_raw_dir, file)
-                  preprocessed_filename = file.replace('.csv', '_preprocessed.csv')
-                  preprocessed_filepath = os.path.join(ticker_preprocessed_dir, preprocessed_filename)
+        for file in tqdm(os.listdir(ticker_raw_dir), desc=f'Processing {ticker}', leave=False):
+            if file.endswith('.csv'):
+                raw_filepath = os.path.join(ticker_raw_dir, file)
+                preprocessed_filename = file.replace('.csv', '_preprocessed.csv')
+                preprocessed_filepath = os.path.join(ticker_preprocessed_dir, preprocessed_filename)
 
-                  if os.path.exists(preprocessed_filepath):
-                      print(f"Preprocessed file already exists: {preprocessed_filepath}. Skipping.")
-                      continue
-
-                  # Read raw CSV
-                  try:
-                      df_raw = pd.read_csv(raw_filepath)
-                      # Ensure timestamp is datetime if needed
-                      if 'timestamp' in df_raw.columns and not pd.api.types.is_datetime64_any_dtype(df_raw['timestamp']):
-                          df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
-                  except Exception as e:
-                      print(f"Error reading {raw_filepath}: {e}")
-                      continue
+                # Read raw CSV
+                try:
+                    df_raw = pd.read_csv(raw_filepath)
+                    # Ensure timestamp is datetime if needed
+                    if 'timestamp' in df_raw.columns and not pd.api.types.is_datetime64_any_dtype(df_raw['timestamp']):
+                        df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+                except Exception as e:
+                    print(f"Error reading {raw_filepath}: {e}")
+                    continue
 
                 # Preprocess
-                  try:
-                      df_preprocessed, label_encoders = self.preprocess_file(df_raw)  # Unpack the tuple
-                  except Exception as e:
-                      print(f"Error preprocessing {raw_filepath}: {e}")
-                      continue
+                try:
+                    df_preprocessed, label_encoders = self.preprocess_file(df_raw)  # Unpack the tuple
+                except Exception as e:
+                    print(f"Error preprocessing {raw_filepath}: {e}")
+                    continue
 
-                  # Print head of the DataFrame
-                  print(f"Preprocessed data for {file}:")
-                  print(df_preprocessed.head())  # Print the entire head without truncation
+                # Print head of the DataFrame
+                print(f"Preprocessed data for {file}:")
+                print(df_preprocessed.head())  # Print the entire head without truncation
 
-                  # Save preprocessed data
-                  self.save_preprocessed_data(df_preprocessed, preprocessed_filepath)
+                # Save preprocessed data
+                self.save_preprocessed_data(df_preprocessed, preprocessed_filepath)
 
+                print(f"Saved preprocessed file to {preprocessed_filepath}")
 
 
 def preprocess():
