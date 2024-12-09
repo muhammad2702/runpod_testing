@@ -27,6 +27,7 @@ from torch.nn.init import xavier_uniform_
 from datetime import datetime, timedelta
 import runpod
 import joblib
+
 # Configuration
 API_KEY = 'de_kgSuhw6v4KnRK0wprJCoBAIhqSd5R'  # Replace with your actual API key
 BASE_URL = 'https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}'
@@ -50,10 +51,8 @@ TICKERS = [
     # Add more tickers as needed
 ]
 
-
 # Timeframes you want to collect data for
 TIMEFRAMES = [
-
     {'multiplier': 1, 'timespan': 'second'},
 ]
 
@@ -91,7 +90,7 @@ def fetch_data(ticker, multiplier, timespan, from_date, to_date):
         print(f"Error fetching data for {ticker} - {timespan}: {response.status_code} - {response.text}")
         return []
 
-def collect(START_DATE,END_DATE):
+def collect(START_DATE, END_DATE):
     start = datetime.strptime(START_DATE, '%Y-%m-%d')
     end = datetime.strptime(END_DATE, '%Y-%m-%d')
 
@@ -123,8 +122,6 @@ def collect(START_DATE,END_DATE):
 
             # Respect API rate limits
             time.sleep(1)  # Adjust sleep time based on your rate limits
-
-
 
 class CryptoDataPreprocessor:
     def __init__(self, raw_data_dir='crypto_data', preprocessed_data_dir='preprocessed_data', columns_to_add=None):
@@ -329,57 +326,61 @@ class CryptoDataPreprocessor:
         :param df: pandas DataFrame with preprocessed data.
         :param filepath: Path where the CSV will be saved.
         """
-
         df[self.columns_to_add].to_csv(filepath, index=False)
         print(f"Saved preprocessed data to {filepath}")
 
     def preprocess_all_files(self):
-    # Traverse the raw_data_dir
-    for ticker in tqdm(os.listdir(self.raw_data_dir), desc='Processing Tickers'):
-        ticker_raw_dir = os.path.join(self.raw_data_dir, ticker)
-        ticker_preprocessed_dir = os.path.join(self.preprocessed_data_dir, ticker)
-        
-        # Create or clean the preprocessed directory
-        if os.path.exists(ticker_preprocessed_dir):
-            # Remove all existing files in the preprocessed directory
-            for old_file in os.listdir(ticker_preprocessed_dir):
-                old_file_path = os.path.join(ticker_preprocessed_dir, old_file)
-                os.remove(old_file_path)
-        else:
-            os.makedirs(ticker_preprocessed_dir, exist_ok=True)
+        # Traverse the raw_data_dir
+        processed_tickers = []
+        for ticker in tqdm(os.listdir(self.raw_data_dir), desc='Processing Tickers'):
+            ticker_raw_dir = os.path.join(self.raw_data_dir, ticker)
+            ticker_preprocessed_dir = os.path.join(self.preprocessed_data_dir, ticker)
+            
+            # Create or clean the preprocessed directory
+            if os.path.exists(ticker_preprocessed_dir):
+                # Remove all existing files in the preprocessed directory
+                for old_file in os.listdir(ticker_preprocessed_dir):
+                    old_file_path = os.path.join(ticker_preprocessed_dir, old_file)
+                    os.remove(old_file_path)
+            else:
+                os.makedirs(ticker_preprocessed_dir, exist_ok=True)
 
-        for file in tqdm(os.listdir(ticker_raw_dir), desc=f'Processing {ticker}', leave=False):
-            if file.endswith('.csv'):
-                raw_filepath = os.path.join(ticker_raw_dir, file)
-                preprocessed_filename = file.replace('.csv', '_preprocessed.csv')
-                preprocessed_filepath = os.path.join(ticker_preprocessed_dir, preprocessed_filename)
+            for file in tqdm(os.listdir(ticker_raw_dir), desc=f'Processing {ticker}', leave=False):
+                if file.endswith('.csv'):
+                    raw_filepath = os.path.join(ticker_raw_dir, file)
+                    preprocessed_filename = file.replace('.csv', '_preprocessed.csv')
+                    preprocessed_filepath = os.path.join(ticker_preprocessed_dir, preprocessed_filename)
 
-                # Read raw CSV
-                try:
-                    df_raw = pd.read_csv(raw_filepath)
-                    # Ensure timestamp is datetime if needed
-                    if 'timestamp' in df_raw.columns and not pd.api.types.is_datetime64_any_dtype(df_raw['timestamp']):
-                        df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
-                except Exception as e:
-                    print(f"Error reading {raw_filepath}: {e}")
-                    continue
+                    # Read raw CSV
+                    try:
+                        df_raw = pd.read_csv(raw_filepath)
+                        # Ensure timestamp is datetime if needed
+                        if 'timestamp' in df_raw.columns and not pd.api.types.is_datetime64_any_dtype(df_raw['timestamp']):
+                            df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+                    except Exception as e:
+                        print(f"Error reading {raw_filepath}: {e}")
+                        continue
 
-                # Preprocess
-                try:
-                    df_preprocessed, label_encoders = self.preprocess_file(df_raw)  # Unpack the tuple
-                except Exception as e:
-                    print(f"Error preprocessing {raw_filepath}: {e}")
-                    continue
+                    # Preprocess
+                    try:
+                        df_preprocessed, label_encoders = self.preprocess_file(df_raw)  # Unpack the tuple
+                    except Exception as e:
+                        print(f"Error preprocessing {raw_filepath}: {e}")
+                        continue
 
-                # Print head of the DataFrame
-                print(f"Preprocessed data for {file}:")
-                print(df_preprocessed.head())  # Print the entire head without truncation
+                    # Print head of the DataFrame
+                    print(f"Preprocessed data for {file}:")
+                    print(df_preprocessed.head())  # Print the entire head without truncation
 
-                # Save preprocessed data
-                self.save_preprocessed_data(df_preprocessed, preprocessed_filepath)
+                    # Save preprocessed data
+                    self.save_preprocessed_data(df_preprocessed, preprocessed_filepath)
 
-                print(f"Saved preprocessed file to {preprocessed_filepath}")
+                    print(f"Saved preprocessed file to {preprocessed_filepath}")
 
+        processed_tickers_count = len(set(processed_tickers))
+        with open('processed_tickers_count.txt', 'w') as f:
+            f.write(str(processed_tickers_count))
+        print(f"Processed {processed_tickers_count} tickers and saved the count.")
 
 def preprocess():
     """
@@ -391,10 +392,10 @@ def preprocess():
 
     # Columns to include in the final output
     columns_to_add = [
-        'leg_direction', 'close_price', 'o' ,'l',  'h', 't' ,'RSI', 'MACD', 'MACD_signal', 'MACD_diff',
-        'ATR', 'BB_width', 'ADX' , #, 'Volatility', 'Trend', 'Trend_strength',
-        'Market_Environment', 'percent_change_classification' #'previous_leg_change', 'previous_leg_length',
-        #'current_leg_change', 'current_leg_length'
+        'leg_direction', 'close_price', 'o', 'l', 'h', 't', 'RSI', 'MACD', 'MACD_signal', 'MACD_diff',
+        'ATR', 'BB_width', 'ADX',  # , 'Volatility', 'Trend', 'Trend_strength',
+        'Market_Environment', 'percent_change_classification'  # 'previous_leg_change', 'previous_leg_length',
+        # 'current_leg_change', 'current_leg_length'
     ]
 
     # Initialize the preprocessor
@@ -408,35 +409,6 @@ def preprocess():
     print("Starting preprocessing...")
     preprocessor.preprocess_all_files()
     print("Preprocessing completed.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # Set seeds for reproducibility
 def set_seed(seed=42):
@@ -484,7 +456,6 @@ class FocalLoss(nn.Module):
             return focal_loss.sum()
         else:
             return focal_loss
-
 
 class ShortTermTransformerModel(nn.Module):
     def __init__(self, num_features, num_cryptos, d_model=64, nhead=2, num_encoder_layers=1,
@@ -551,7 +522,7 @@ class ShortTermTransformerModel(nn.Module):
     def initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                xavier_uniform_(m.weight)
+                xavier_uniform(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Embedding):
@@ -559,8 +530,6 @@ class ShortTermTransformerModel(nn.Module):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
-
-
 
 class CryptoDataset(Dataset):
     def __init__(self, dataframe, feature_cols, window_size=60):
@@ -605,7 +574,6 @@ class CryptoDataset(Dataset):
                 torch.tensor(leg_direction, dtype=torch.long),
             ),
         )
-
 
 def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, device, accumulation_steps=2):
     model.train()
@@ -656,7 +624,6 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
     metrics["leg_direction_acc"] /= total
 
     return epoch_losses, metrics
-
 
 def validate(model, dataloader, criterion_dict, device):
     model.eval()
@@ -710,13 +677,11 @@ def validate(model, dataloader, criterion_dict, device):
 
     return val_losses, val_metrics
 
-
 def compute_class_weights(df, target_col):
     class_counts = df[target_col].value_counts().sort_index()
     total = class_counts.sum()
     weights = [total / (len(class_counts) * c) for c in class_counts]
     return torch.tensor(weights, dtype=torch.float)
-
 
 def main():
     # Parameters
@@ -760,7 +725,6 @@ def main():
     val_df = full_df.iloc[train_size:train_size+val_size]
     test_df = full_df.iloc[train_size+val_size:]
 
-
     # Print class distributions
     print("Percent change class distribution:")
     print(train_df['percent_change_classification'].value_counts())
@@ -786,11 +750,9 @@ def main():
     weight_for_each_class = 1.0 / class_sample_counts
     samples_weight = torch.from_numpy(weight_for_each_class[targets]).double()
 
-
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-
 
     num_features = len(feature_cols)
     num_cryptos = full_df['crypto'].nunique()
@@ -867,9 +829,6 @@ def main():
     print(f"Test Losses: {test_losses}")
     print(f"Test Metrics: {test_metrics}")
 
-
-
-
 def preprocess_and_predict():
     """
     Fetch latest data, preprocess it, and use the model to make predictions.
@@ -885,6 +844,14 @@ def preprocess_and_predict():
 
     # Step 3: Load the trained model
     print("Loading the model...")
+    with open('processed_tickers_count.txt', 'r') as f:
+       processed_tickers_count = int(f.read())
+
+    # Validate the number of tickers
+    num_cryptos = len(TICKERS)
+    if num_cryptos != processed_tickers_count:
+        raise ValueError(f"Mismatch in number of tickers. Processed: {processed_tickers_count}, Provided: {num_cryptos}")
+
     # Load preprocessed data (assuming it's saved in 'preprocessed_data' directory)
     latest_preprocessed_files = []
     for ticker in TICKERS:
@@ -955,7 +922,6 @@ def preprocess_and_predict():
     print("Predictions saved to 'predictions/latest_predictions.csv'.")
     return { "status": "success", "predictions": predictions }
 
-
 def handler(job):
     # Access the input data from the job
     job_input = job.get("input", {})
@@ -969,12 +935,10 @@ def handler(job):
     
     # Implement your processing logic using 'start_date' and 'end_date'
 
-    collect(START_DATE,END_DATE)
+    collect(START_DATE, END_DATE)
     preprocess()
     main()
     prediction_result = preprocess_and_predict()
     return prediction_result
-	
+
 runpod.serverless.start({"handler": handler})
-    
-    
