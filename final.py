@@ -868,6 +868,7 @@ def preprocess_and_predict():
     """
     Fetch latest data, preprocess it, and use the model to make predictions.
     """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Step 1: Fetch latest data
     print("Fetching latest data...")
     collect("2024-12-01", "2024-12-09")
