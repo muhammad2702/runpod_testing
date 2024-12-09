@@ -878,36 +878,72 @@ def preprocess_and_predict():
 
     # Step 3: Load the trained model
     print("Loading the model...")
+    # Load preprocessed data (assuming it's saved in 'preprocessed_data' directory)
+    latest_preprocessed_files = []
+    for ticker in TICKERS:
+        ticker_preprocessed_dir = os.path.join('preprocessed_data', ticker.replace(":", "_"))
+        for file in os.listdir(ticker_preprocessed_dir):
+            if file.endswith('_preprocessed.csv'):
+                filepath = os.path.join(ticker_preprocessed_dir, file)
+                df = pd.read_csv(filepath)
+                latest_preprocessed_files.append(df)
+    if not latest_preprocessed_files:
+        print("No preprocessed data found for prediction.")
+        return { "status": "failure", "message": "No data available for prediction." }
+    
+    preprocessed_data = pd.concat(latest_preprocessed_files, ignore_index=True)
+
+    # Load the model
+    num_features = len([col for col in preprocessed_data.columns if col not in ['percent_change_classification', 'leg_direction', 'crypto', 't']])
+    num_classes = preprocessed_data['percent_change_classification'].nunique()
+    num_cryptos = len(TICKERS)
+
     model = ShortTermTransformerModel(
-        num_features=len(preprocessed_data.columns) - 1,  # Exclude target columns
-        num_cryptos=len(TICKERS),
+        num_features=num_features,
+        num_cryptos=num_cryptos,
         d_model=128,
         nhead=8,
         num_encoder_layers=4,
-        dim_feedforward=128
-    )
-    model.load_state_dict(torch.load('best_short_term_transformer_model.pth'))
-    model.eval()
+        dim_feedforward=128,
+        num_classes=num_classes,
+        max_seq_length=80  # Assuming window_size=80
+    ).to(device)
+
+    try:
+        model.load_state_dict(torch.load('best_short_term_transformer_model.pth'))
+        model.eval()
+    except Exception as e:
+        print(f"Error loading the model: {e}")
+        return { "status": "failure", "message": "Model loading failed." }
 
     # Step 4: Prepare data for prediction
-    inputs = torch.tensor(preprocessed_data.iloc[:, :-1].values, dtype=torch.float32)  # Exclude target
-    crypto_ids = torch.tensor([TICKERS.index(ticker) for ticker in latest_data['ticker']], dtype=torch.long)
+    print("Preparing data for prediction...")
+    # Assuming 'crypto' and 't' columns are present
+    feature_cols = [col for col in preprocessed_data.columns if col not in ['percent_change_classification', 'leg_direction', 'crypto', 't']]
+    scaler = StandardScaler()
+    preprocessed_data[feature_cols] = scaler.fit_transform(preprocessed_data[feature_cols])
+
+    # Create dataset and dataloader
+    prediction_dataset = CryptoDataset(preprocessed_data, feature_cols, window_size=80)
+    prediction_loader = DataLoader(prediction_dataset, batch_size=48, shuffle=False, num_workers=2)
 
     # Step 5: Make predictions
     print("Making predictions...")
-    percent_probs, leg_probs = model(inputs, crypto_ids)
-    predictions = {
-        "percent_change": percent_probs.argmax(dim=1).tolist(),
-        "leg_direction": leg_probs.argmax(dim=1).tolist()
-    }
+    predictions = {"percent_change": [], "leg_direction": []}
+    with torch.no_grad():
+        for (inputs, crypto_ids), _ in tqdm(prediction_loader, desc="Predicting"):
+            inputs = inputs.to(device)
+            crypto_ids = crypto_ids.to(device)
+            percent_probs, leg_probs = model(inputs, crypto_ids)
+            predictions["percent_change"].extend(percent_probs.argmax(dim=1).cpu().tolist())
+            predictions["leg_direction"].extend(leg_probs.argmax(dim=1).cpu().tolist())
 
-    # Output results
-    print("Predictions:")
-    print(predictions)
-
-    # Save predictions for visualization
+    # Add predictions to the DataFrame
     preprocessed_data['percent_change_prediction'] = predictions["percent_change"]
     preprocessed_data['leg_direction_prediction'] = predictions["leg_direction"]
+
+    # Save predictions for visualization
+    os.makedirs('predictions', exist_ok=True)
     preprocessed_data.to_csv('predictions/latest_predictions.csv', index=False)
     print("Predictions saved to 'predictions/latest_predictions.csv'.")
     return { "status": "success", "predictions": predictions }
@@ -929,7 +965,8 @@ def handler(job):
     collect(START_DATE,END_DATE)
     preprocess()
     main()
-    preprocess_and_predict()
+    prediction_result = preprocess_and_predict()
+    return prediction_result
 	
 runpod.serverless.start({"handler": handler})
     
