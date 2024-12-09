@@ -704,6 +704,8 @@ def main():
                     dfs.append(df)
 
     full_df = pd.concat(dfs, ignore_index=True)
+    print("::full_df:")
+    print(full_df)
 
     target_cols = ['percent_change_classification', 'leg_direction']
     feature_cols = [col for col in full_df.columns if col not in target_cols + ['t', 'crypto']]
@@ -847,11 +849,7 @@ def preprocess_and_predict():
     with open('processed_tickers_count.txt', 'r') as f:
        processed_tickers_count = int(f.read())
 
-    # Validate the number of tickers
-    num_cryptos = len(TICKERS)
-    if num_cryptos != processed_tickers_count:
-        raise ValueError(f"Mismatch in number of tickers. Processed: {processed_tickers_count}, Provided: {num_cryptos}")
-
+    
     # Load preprocessed data (assuming it's saved in 'preprocessed_data' directory)
     latest_preprocessed_files = []
     for ticker in TICKERS:
@@ -861,6 +859,8 @@ def preprocess_and_predict():
                 filepath = os.path.join(ticker_preprocessed_dir, file)
                 df = pd.read_csv(filepath)
                 latest_preprocessed_files.append(df)
+    print("::latest_preprocessed_files:")
+    print(latest_preprocessed_files)
     if not latest_preprocessed_files:
         print("No preprocessed data found for prediction.")
         return { "status": "failure", "message": "No data available for prediction." }
