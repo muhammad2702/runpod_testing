@@ -26,7 +26,7 @@ from sklearn.metrics import balanced_accuracy_score  # If you want to use balanc
 from torch.nn.init import xavier_uniform_
 from datetime import datetime, timedelta
 import runpod
-
+import joblib
 # Configuration
 API_KEY = 'de_kgSuhw6v4KnRK0wprJCoBAIhqSd5R'  # Replace with your actual API key
 BASE_URL = 'https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}'
@@ -744,9 +744,9 @@ def main():
     # Normalize features
     scaler = StandardScaler()
     full_df[feature_cols] = scaler.fit_transform(full_df[feature_cols])
-
-    # Shuffle and split
-    full_df = full_df.sample(frac=1, random_state=42).reset_index(drop=True)
+    joblib.dump(scaler, 'scaler.joblib')  # Save the scaler
+    # Avoid shuffling before splitting
+    full_df = full_df.sort_values('t').reset_index(drop=True)  # Ensure data is sorted by time
 
     train_size = int(0.7 * len(full_df))
     val_size = int(0.15 * len(full_df))
@@ -754,6 +754,7 @@ def main():
     train_df = full_df.iloc[:train_size]
     val_df = full_df.iloc[train_size:train_size+val_size]
     test_df = full_df.iloc[train_size+val_size:]
+
 
     # Print class distributions
     print("Percent change class distribution:")
@@ -921,8 +922,8 @@ def preprocess_and_predict():
     print("Preparing data for prediction...")
     # Assuming 'crypto' and 't' columns are present
     feature_cols = [col for col in preprocessed_data.columns if col not in ['percent_change_classification', 'leg_direction', 'crypto', 't']]
-    scaler = StandardScaler()
-    preprocessed_data[feature_cols] = scaler.fit_transform(preprocessed_data[feature_cols])
+    scaler = joblib.load('scaler.joblib')  # Load the scale
+    preprocessed_data[feature_cols] = scaler.transform(preprocessed_data[feature_cols])
 
     # Create dataset and dataloader
     prediction_dataset = CryptoDataset(preprocessed_data, feature_cols, window_size=80)
