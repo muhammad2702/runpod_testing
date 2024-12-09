@@ -716,7 +716,7 @@ def compute_class_weights(df, target_col):
 def main():
     # Parameters
     batch_size = 48
-    epochs = 2
+    epochs = 1
     learning_rate = 5e-4
     window_size = 80
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
