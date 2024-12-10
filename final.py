@@ -969,6 +969,7 @@ def preprocess_and_predict():
     os.makedirs('predictions', exist_ok=True)
     predictions_df.to_csv('predictions/latest_predictions.csv', index=False)
     print("Predictions saved to 'predictions/latest_predictions.csv'.")
+    print(predictions_df)
     predictions_dict = predictions_df.to_dict(orient="records")
     return { "status": "success", "predictions": predictions_dict }
 
