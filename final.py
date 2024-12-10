@@ -499,25 +499,22 @@ class ShortTermTransformerModel(nn.Module):
         self.initialize_weights()
 
     def forward(self, src, crypto_id):
-        # Transform input features and add crypto embedding
-        src = self.input_linear(src)
-        crypto_emb = self.crypto_embedding(crypto_id).unsqueeze(1)
-        src = src + crypto_emb
+    # Transform input features and add crypto embedding
+    src = self.input_linear(src)
+    crypto_emb = self.crypto_embedding(crypto_id).unsqueeze(1)
+    src = src + crypto_emb
 
-        # Pass through Transformer
-        memory = self.transformer_encoder(src)
-        # Global average pooling over the sequence dimension
-        features = torch.mean(memory, dim=1)
+    # Pass through Transformer
+    memory = self.transformer_encoder(src)
+    # Global average pooling over the sequence dimension
+    features = torch.mean(memory, dim=1)
 
-        # Compute logits
-        percent_logits = self.percent_change_head(features)
-        leg_logits = self.leg_direction_head(features)
+    # Compute logits
+    percent_logits = self.percent_change_head(features)
+    leg_logits = self.leg_direction_head(features)
 
-        # Convert logits to probability distributions
-        percent_probs = nn.functional.softmax(percent_logits, dim=-1)
-        leg_probs = nn.functional.softmax(leg_logits, dim=-1)
-
-        return percent_probs, leg_probs
+    # Remove softmax; return raw logits
+    return percent_logits, leg_logits
 
     def initialize_weights(self):
         for m in self.modules():
@@ -574,7 +571,7 @@ class CryptoDataset(Dataset):
                 torch.tensor(leg_direction, dtype=torch.long),
             ),
         )
-
+ 
 def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, device, accumulation_steps=2):
     model.train()
     epoch_losses = {"percent_change": 0, "leg_direction": 0, "total": 0}
@@ -583,7 +580,7 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
 
     optimizer.zero_grad(set_to_none=True)
 
-    for idx, ((inputs, crypto_ids), (percent_targets, leg_targets)) in enumerate(tqdm(dataloader, desc="Training")):
+    for idx, ((inputs, crypto_ids), (percent_targets, leg_targets), _) in enumerate(tqdm(dataloader, desc="Training")):
         inputs = inputs.to(device)
         crypto_ids = crypto_ids.to(device)
         percent_targets = percent_targets.to(device)
@@ -595,7 +592,7 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
             loss_percent = criterion_dict['percent_ce'](percent_out, percent_targets)
             loss_leg = criterion_dict['leg_ce'](leg_out, leg_targets)
             
-            total_loss = (0.8 * loss_percent + 0.2 * loss_leg) / accumulation_steps
+            total_loss = (0.6 * loss_percent + 0.4 * loss_leg) / accumulation_steps
         
         scaler.scale(total_loss).backward()
 
@@ -604,7 +601,7 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
         
         epoch_losses["percent_change"] += loss_percent.item() * batch_size
         epoch_losses["leg_direction"] += loss_leg.item() * batch_size
-        epoch_losses["total"] += (total_loss.item() * batch_size * accumulation_steps)
+        epoch_losses["total"] += (0.8 * loss_percent.item() + 0.2 * loss_leg.item()) * batch_size  # Correct scaling
         
         _, predicted_percent = torch.max(percent_out, 1)
         _, predicted_leg = torch.max(leg_out, 1)
@@ -617,6 +614,13 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
+    # Handle remaining gradients
+    if (idx + 1) % accumulation_steps != 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+
     for key in epoch_losses:
         epoch_losses[key] /= total
 
@@ -624,6 +628,7 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
     metrics["leg_direction_acc"] /= total
 
     return epoch_losses, metrics
+
 
 def validate(model, dataloader, criterion_dict, device):
     model.eval()
@@ -647,7 +652,7 @@ def validate(model, dataloader, criterion_dict, device):
 
             loss_percent = criterion_dict['percent_ce'](percent_out, percent_targets)
             loss_leg = criterion_dict['leg_ce'](leg_out, leg_targets)
-            total_loss = 0.4 * loss_percent + 0.4 * loss_leg
+            total_loss = 0.6 * loss_percent + 0.4 * loss_leg
 
             batch_size = inputs.size(0)
             total += batch_size
@@ -834,8 +839,10 @@ def main():
 def preprocess_and_predict():
     """
     Fetch latest data, preprocess it, and use the model to make predictions.
+    Stores predictions separately without altering the original full_df.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     # Step 1: Fetch latest data
     print("Fetching latest data...")
     collect("2024-09-01", "2024-11-02")
@@ -846,7 +853,6 @@ def preprocess_and_predict():
 
     # Step 3: Load the trained model
     print("Loading the model...")
-  
 
     preprocessed_data_dir = 'preprocessed_data'
     dfs = []
@@ -860,9 +866,13 @@ def preprocess_and_predict():
                     df['crypto'] = ticker
                     dfs.append(df)
 
+    if not dfs:
+        print("No preprocessed data found. Exiting prediction.")
+        return { "status": "failure", "message": "No preprocessed data available for prediction." }
+
     full_df = pd.concat(dfs, ignore_index=True)
     print("::full_df:")
-    print(full_df)
+    print(full_df.head())
 
     target_cols = ['percent_change_classification', 'leg_direction']
     feature_cols = [col for col in full_df.columns if col not in target_cols + ['t', 'crypto']]
@@ -871,27 +881,12 @@ def preprocess_and_predict():
     full_df.dropna(subset=feature_cols + target_cols, inplace=True)
 
     full_df = full_df.sort_values('t').reset_index(drop=True)  # Ensure data is sorted by time
-   #////////////////////////////////////////////////
+
     # Load the model
-#here
-
-
-
     num_features = len(feature_cols)
     num_cryptos = full_df['crypto'].nunique()
     num_classes = full_df['percent_change_classification'].nunique()
 
-
-
-
-
-
-
-
-
-
-
-    
     model = ShortTermTransformerModel(
         num_features=num_features,
         num_cryptos=num_cryptos,
@@ -904,16 +899,21 @@ def preprocess_and_predict():
     ).to(device)
 
     try:
-        model.load_state_dict(torch.load('best_short_term_transformer_model.pth'))
+        model.load_state_dict(torch.load('best_short_term_transformer_model.pth', map_location=device))
         model.eval()
+        print("Model loaded successfully.")
     except Exception as e:
         print(f"Error loading the model: {e}")
         return { "status": "failure", "message": "Model loading failed." }
 
     # Step 4: Prepare data for prediction
     print("Preparing data for prediction...")
-    # Assuming 'crypto' and 't' columns are present
-    scaler = joblib.load('scaler.joblib')  # Load the scale
+    # Ensure 'crypto' and 't' columns are present
+    if 'crypto' not in full_df.columns or 't' not in full_df.columns:
+        print("Error: 'crypto' and/or 't' columns are missing from the preprocessed data.")
+        return { "status": "failure", "message": "'crypto' and/or 't' columns are missing from the preprocessed data." }
+
+    scaler = joblib.load('scaler.joblib')  # Load the scaler
     full_df[feature_cols] = scaler.transform(full_df[feature_cols])
 
     # Create dataset and dataloader
@@ -923,23 +923,43 @@ def preprocess_and_predict():
     # Step 5: Make predictions
     print("Making predictions...")
     predictions = {"percent_change": [], "leg_direction": []}
+    prediction_timestamps = []
+
     with torch.no_grad():
-        for (inputs, crypto_ids), _ in tqdm(prediction_loader, desc="Predicting"):
+        for (inputs, crypto_ids), (percent_targets, leg_targets) in tqdm(prediction_loader, desc="Predicting"):
             inputs = inputs.to(device)
             crypto_ids = crypto_ids.to(device)
-            percent_probs, leg_probs = model(inputs, crypto_ids)
-            predictions["percent_change"].extend(percent_probs.argmax(dim=1).cpu().tolist())
-            predictions["leg_direction"].extend(leg_probs.argmax(dim=1).cpu().tolist())
+            percent_logits, leg_logits = model(inputs, crypto_ids)
 
-    # Add predictions to the DataFrame
-    full_df['percent_change_prediction'] = predictions["percent_change"]
-    full_df['leg_direction_prediction'] = predictions["leg_direction"]
+            # Convert logits to predictions
+            percent_pred = torch.argmax(percent_logits, dim=1).cpu().tolist()
+            leg_pred = torch.argmax(leg_logits, dim=1).cpu().tolist()
+
+            predictions["percent_change"].extend(percent_pred)
+            predictions["leg_direction"].extend(leg_pred)
+
+            # Extract corresponding timestamps for predictions
+            # Each prediction corresponds to the row at index (window_size + idx) in the original dataframe
+            # Calculate the start index for this batch
+            batch_size = inputs.size(0)
+            current_batch_start = len(predictions["percent_change"]) - batch_size
+            prediction_indices = range(current_batch_start, current_batch_start + batch_size)
+            prediction_timestamps.extend(full_df['t'].iloc[prediction_indices].tolist())
+
+    # Create a separate DataFrame for predictions
+    predictions_df = pd.DataFrame({
+        't': prediction_timestamps,
+        'crypto': full_df['crypto'].iloc[80:80 + len(predictions["percent_change"])].values,
+        'percent_change_prediction': predictions["percent_change"],
+        'leg_direction_prediction': predictions["leg_direction"]
+    })
 
     # Save predictions for visualization
     os.makedirs('predictions', exist_ok=True)
-    full_df.to_csv('predictions/latest_predictions.csv', index=False)
+    predictions_df.to_csv('predictions/latest_predictions.csv', index=False)
     print("Predictions saved to 'predictions/latest_predictions.csv'.")
-    return { "status": "success", "predictions": predictions }
+
+    return { "status": "success", "predictions": predictions_df }
 
 def handler(job):
     # Access the input data from the job
