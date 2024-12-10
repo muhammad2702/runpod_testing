@@ -564,7 +564,6 @@ class CryptoDataset(Dataset):
 
         percent_change = self.crypto_data[crypto].iloc[target_idx]['percent_change_classification']
         leg_direction = self.crypto_data[crypto].iloc[target_idx]['leg_direction']
-        timestamp = self.crypto_data[crypto].iloc[target_idx]['t']  # Extract the timestamp
 
         crypto_id = self.crypto_to_id[crypto]
 
@@ -574,9 +573,7 @@ class CryptoDataset(Dataset):
                 torch.tensor(percent_change, dtype=torch.long),
                 torch.tensor(leg_direction, dtype=torch.long),
             ),
-            timestamp  # Return the timestamp
         )
-
 
 def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, device, accumulation_steps=2):
     model.train()
@@ -834,7 +831,6 @@ def main():
     print(f"Test Losses: {test_losses}")
     print(f"Test Metrics: {test_metrics}")
 
-
 def preprocess_and_predict():
     """
     Fetch latest data, preprocess it, and use the model to make predictions.
@@ -850,6 +846,7 @@ def preprocess_and_predict():
 
     # Step 3: Load the trained model
     print("Loading the model...")
+  
 
     preprocessed_data_dir = 'preprocessed_data'
     dfs = []
@@ -874,12 +871,27 @@ def preprocess_and_predict():
     full_df.dropna(subset=feature_cols + target_cols, inplace=True)
 
     full_df = full_df.sort_values('t').reset_index(drop=True)  # Ensure data is sorted by time
-
+   #////////////////////////////////////////////////
     # Load the model
+#here
+
+
+
     num_features = len(feature_cols)
     num_cryptos = full_df['crypto'].nunique()
     num_classes = full_df['percent_change_classification'].nunique()
 
+
+
+
+
+
+
+
+
+
+
+    
     model = ShortTermTransformerModel(
         num_features=num_features,
         num_cryptos=num_cryptos,
@@ -892,16 +904,16 @@ def preprocess_and_predict():
     ).to(device)
 
     try:
-        model.load_state_dict(torch.load('best_short_term_transformer_model.pth', map_location=device))
+        model.load_state_dict(torch.load('best_short_term_transformer_model.pth'))
         model.eval()
-        print("Model loaded successfully.")
     except Exception as e:
         print(f"Error loading the model: {e}")
         return { "status": "failure", "message": "Model loading failed." }
 
     # Step 4: Prepare data for prediction
     print("Preparing data for prediction...")
-    scaler = joblib.load('scaler.joblib')  # Load the scaler
+    # Assuming 'crypto' and 't' columns are present
+    scaler = joblib.load('scaler.joblib')  # Load the scale
     full_df[feature_cols] = scaler.transform(full_df[feature_cols])
 
     # Create dataset and dataloader
@@ -911,29 +923,23 @@ def preprocess_and_predict():
     # Step 5: Make predictions
     print("Making predictions...")
     predictions = {"percent_change": [], "leg_direction": []}
-    timestamps = []
     with torch.no_grad():
-        for (inputs, crypto_ids), _, batch_timestamps in tqdm(prediction_loader, desc="Predicting"):
+        for (inputs, crypto_ids), _ in tqdm(prediction_loader, desc="Predicting"):
             inputs = inputs.to(device)
             crypto_ids = crypto_ids.to(device)
             percent_probs, leg_probs = model(inputs, crypto_ids)
             predictions["percent_change"].extend(percent_probs.argmax(dim=1).cpu().tolist())
             predictions["leg_direction"].extend(leg_probs.argmax(dim=1).cpu().tolist())
-            timestamps.extend(batch_timestamps)  # Collect timestamps
 
-    predictions_df = pd.DataFrame({
-        'timestamp': timestamps,
-        'percent_change_prediction': predictions["percent_change"],
-        'leg_direction_prediction': predictions["leg_direction"]
-    })
+    # Add predictions to the DataFrame
+    full_df['percent_change_prediction'] = predictions["percent_change"]
+    full_df['leg_direction_prediction'] = predictions["leg_direction"]
 
-    # Save predictions to CSV (optional)
-    predictions_df.to_csv('predictions.csv', index=False)
-    print("Saved predictions to predictions.csv")
-
-    # Optional: Return predictions as part of the response
-    return { "status": "success", "predictions": predictions_df }
-
+    # Save predictions for visualization
+    os.makedirs('predictions', exist_ok=True)
+    full_df.to_csv('predictions/latest_predictions.csv', index=False)
+    print("Predictions saved to 'predictions/latest_predictions.csv'.")
+    return { "status": "success", "predictions": predictions }
 
 def handler(job):
     # Access the input data from the job
