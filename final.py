@@ -499,22 +499,14 @@ class ShortTermTransformerModel(nn.Module):
         self.initialize_weights()
 
     def forward(self, src, crypto_id):
-    # Transform input features and add crypto embedding
-    src = self.input_linear(src)
-    crypto_emb = self.crypto_embedding(crypto_id).unsqueeze(1)
-    src = src + crypto_emb
-
-    # Pass through Transformer
-    memory = self.transformer_encoder(src)
-    # Global average pooling over the sequence dimension
-    features = torch.mean(memory, dim=1)
-
-    # Compute logits
-    percent_logits = self.percent_change_head(features)
-    leg_logits = self.leg_direction_head(features)
-
-    # Remove softmax; return raw logits
-    return percent_logits, leg_logits
+     src = self.input_linear(src)
+     crypto_emb = self.crypto_embedding(crypto_id).unsqueeze(1)
+     src = src + crypto_emb
+     memory = self.transformer_encoder(src)
+     features = torch.mean(memory, dim=1)
+     percent_logits = self.percent_change_head(features)
+     leg_logits = self.leg_direction_head(features)
+     return percent_logits, leg_logits
 
     def initialize_weights(self):
         for m in self.modules():
