@@ -899,6 +899,7 @@ def preprocess_and_predict():
     ).to(device)
 
     try:
+        # Specify map_location to ensure compatibility with the device
         model.load_state_dict(torch.load('best_short_term_transformer_model.pth', map_location=device))
         model.eval()
         print("Model loaded successfully.")
@@ -916,50 +917,65 @@ def preprocess_and_predict():
     scaler = joblib.load('scaler.joblib')  # Load the scaler
     full_df[feature_cols] = scaler.transform(full_df[feature_cols])
 
-    # Create dataset and dataloader
-    prediction_dataset = CryptoDataset(full_df, feature_cols, window_size=80)
-    prediction_loader = DataLoader(prediction_dataset, batch_size=48, shuffle=False, num_workers=2)
+    # Initialize an empty list to collect all predictions
+    predictions_list = []
 
-    # Step 5: Make predictions
-    print("Making predictions...")
-    predictions = {"percent_change": [], "leg_direction": []}
-    prediction_timestamps = []
+    # Iterate over each unique cryptocurrency
+    for crypto in tqdm(full_df['crypto'].unique(), desc="Processing Cryptocurrencies"):
+        # Filter data for the current crypto
+        crypto_df = full_df[full_df['crypto'] == crypto].reset_index(drop=True)
 
-    with torch.no_grad():
-        for (inputs, crypto_ids), (percent_targets, leg_targets) in tqdm(prediction_loader, desc="Predicting"):
-            inputs = inputs.to(device)
-            crypto_ids = crypto_ids.to(device)
-            percent_logits, leg_logits = model(inputs, crypto_ids)
+        # Initialize the dataset and dataloader for the current crypto
+        crypto_dataset = CryptoDataset(crypto_df, feature_cols, window_size=80)
+        crypto_loader = DataLoader(crypto_dataset, batch_size=48, shuffle=False, num_workers=2)
 
-            # Convert logits to predictions
-            percent_pred = torch.argmax(percent_logits, dim=1).cpu().tolist()
-            leg_pred = torch.argmax(leg_logits, dim=1).cpu().tolist()
+        # Initialize lists to store predictions and corresponding timestamps
+        percent_change_predictions = []
+        leg_direction_predictions = []
+        prediction_timestamps = []
 
-            predictions["percent_change"].extend(percent_pred)
-            predictions["leg_direction"].extend(leg_pred)
+        with torch.no_grad():
+            for (inputs, crypto_ids), _ in tqdm(crypto_loader, desc=f"Predicting for {crypto}", leave=False):
+                inputs = inputs.to(device)
+                crypto_ids = crypto_ids.to(device)
+                percent_probs, leg_probs = model(inputs, crypto_ids)
 
-            # Extract corresponding timestamps for predictions
-            # Each prediction corresponds to the row at index (window_size + idx) in the original dataframe
-            # Calculate the start index for this batch
-            batch_size = inputs.size(0)
-            current_batch_start = len(predictions["percent_change"]) - batch_size
-            prediction_indices = range(current_batch_start, current_batch_start + batch_size)
-            prediction_timestamps.extend(full_df['t'].iloc[prediction_indices].tolist())
+                # Convert logits to predictions
+                percent_pred = torch.argmax(percent_probs, dim=1).cpu().tolist()
+                leg_pred = torch.argmax(leg_probs, dim=1).cpu().tolist()
 
-    # Create a separate DataFrame for predictions
-    predictions_df = pd.DataFrame({
-        't': prediction_timestamps,
-        'crypto': full_df['crypto'].iloc[80:80 + len(predictions["percent_change"])].values,
-        'percent_change_prediction': predictions["percent_change"],
-        'leg_direction_prediction': predictions["leg_direction"]
-    })
+                percent_change_predictions.extend(percent_pred)
+                leg_direction_predictions.extend(leg_pred)
 
-    # Save predictions for visualization
+                # Calculate corresponding timestamps
+                # Each prediction corresponds to the row immediately after the window
+                start_index = len(percent_change_predictions) - len(percent_pred)
+                end_index = start_index + len(percent_pred)
+                corresponding_timestamps = crypto_df['t'].iloc[start_index + 80:end_index + 80].tolist()
+
+                prediction_timestamps.extend(corresponding_timestamps)
+
+        # Create a DataFrame for the current crypto's predictions
+        crypto_predictions_df = pd.DataFrame({
+            't': prediction_timestamps,
+            'crypto': [crypto] * len(percent_change_predictions),
+            'percent_change_prediction': percent_change_predictions,
+            'leg_direction_prediction': leg_direction_predictions
+        })
+
+        # Append to the main predictions list
+        predictions_list.append(crypto_predictions_df)
+
+    # Concatenate all predictions into a single DataFrame
+    predictions_df = pd.concat(predictions_list, ignore_index=True)
+
+    # Save predictions separately
     os.makedirs('predictions', exist_ok=True)
     predictions_df.to_csv('predictions/latest_predictions.csv', index=False)
     print("Predictions saved to 'predictions/latest_predictions.csv'.")
 
     return { "status": "success", "predictions": predictions_df }
+
 
 def handler(job):
     # Access the input data from the job
