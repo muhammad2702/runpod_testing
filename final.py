@@ -499,14 +499,20 @@ class ShortTermTransformerModel(nn.Module):
         self.initialize_weights()
 
     def forward(self, src, crypto_id):
-     src = self.input_linear(src)
-     crypto_emb = self.crypto_embedding(crypto_id).unsqueeze(1)
-     src = src + crypto_emb
-     memory = self.transformer_encoder(src)
-     features = torch.mean(memory, dim=1)
-     percent_logits = self.percent_change_head(features)
-     leg_logits = self.leg_direction_head(features)
-     return percent_logits, leg_logits
+        # Transform input features and add crypto embedding
+        src = self.input_linear(src)
+        crypto_emb = self.crypto_embedding(crypto_id).unsqueeze(1)
+        src = src + crypto_emb
+
+        # Pass through Transformer
+        memory = self.transformer_encoder(src)
+        # Global average pooling over the sequence dimension
+        features = torch.mean(memory, dim=1)
+
+        # Compute logits
+        percent_logits = self.percent_change_head(features)
+        leg_logits = self.leg_direction_head(features)
+        return percent_logits, leg_logits
 
     def initialize_weights(self):
         for m in self.modules():
@@ -563,7 +569,7 @@ class CryptoDataset(Dataset):
                 torch.tensor(leg_direction, dtype=torch.long),
             ),
         )
- 
+
 def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, device, accumulation_steps=2):
     model.train()
     epoch_losses = {"percent_change": 0, "leg_direction": 0, "total": 0}
@@ -572,7 +578,7 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
 
     optimizer.zero_grad(set_to_none=True)
 
-    for idx, ((inputs, crypto_ids), (percent_targets, leg_targets), _) in enumerate(tqdm(dataloader, desc="Training")):
+    for idx, ((inputs, crypto_ids), (percent_targets, leg_targets)) in enumerate(tqdm(dataloader, desc="Training")):
         inputs = inputs.to(device)
         crypto_ids = crypto_ids.to(device)
         percent_targets = percent_targets.to(device)
@@ -593,7 +599,7 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
         
         epoch_losses["percent_change"] += loss_percent.item() * batch_size
         epoch_losses["leg_direction"] += loss_leg.item() * batch_size
-        epoch_losses["total"] += (0.8 * loss_percent.item() + 0.2 * loss_leg.item()) * batch_size  # Correct scaling
+        epoch_losses["total"] += (total_loss.item() * batch_size * accumulation_steps)
         
         _, predicted_percent = torch.max(percent_out, 1)
         _, predicted_leg = torch.max(leg_out, 1)
@@ -606,13 +612,6 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
-    # Handle remaining gradients
-    if (idx + 1) % accumulation_steps != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
-
     for key in epoch_losses:
         epoch_losses[key] /= total
 
@@ -620,7 +619,6 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
     metrics["leg_direction_acc"] /= total
 
     return epoch_losses, metrics
-
 
 def validate(model, dataloader, criterion_dict, device):
     model.eval()
