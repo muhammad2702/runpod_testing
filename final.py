@@ -846,32 +846,52 @@ def preprocess_and_predict():
 
     # Step 3: Load the trained model
     print("Loading the model...")
-    with open('processed_tickers_count.txt', 'r') as f:
-       processed_tickers_count = int(f.read())
+  
 
-    
-    # Load preprocessed data (assuming it's saved in 'preprocessed_data' directory)
-    latest_preprocessed_files = []
-    for ticker in TICKERS:
-        ticker_preprocessed_dir = os.path.join('preprocessed_data', ticker.replace(":", "_"))
-        for file in os.listdir(ticker_preprocessed_dir):
-            if file.endswith('_preprocessed.csv'):
-                filepath = os.path.join(ticker_preprocessed_dir, file)
-                df = pd.read_csv(filepath)
-                latest_preprocessed_files.append(df)
-    print("::latest_preprocessed_files:")
-    print(latest_preprocessed_files)
-    if not latest_preprocessed_files:
-        print("No preprocessed data found for prediction.")
-        return { "status": "failure", "message": "No data available for prediction." }
-    
-    preprocessed_data = pd.concat(latest_preprocessed_files, ignore_index=True)
+    preprocessed_data_dir = 'preprocessed_data'
+    dfs = []
+    for ticker in os.listdir(preprocessed_data_dir):
+        ticker_dir = os.path.join(preprocessed_data_dir, ticker)
+        if os.path.isdir(ticker_dir):
+            for file in os.listdir(ticker_dir):
+                if file.endswith('_preprocessed.csv'):
+                    filepath = os.path.join(ticker_dir, file)
+                    df = pd.read_csv(filepath)
+                    df['crypto'] = ticker
+                    dfs.append(df)
 
+    full_df = pd.concat(dfs, ignore_index=True)
+    print("::full_df:")
+    print(full_df)
+
+    target_cols = ['percent_change_classification', 'leg_direction']
+    feature_cols = [col for col in full_df.columns if col not in target_cols + ['t', 'crypto']]
+
+    # Drop NaN
+    full_df.dropna(subset=feature_cols + target_cols, inplace=True)
+
+    full_df = full_df.sort_values('t').reset_index(drop=True)  # Ensure data is sorted by time
+   #////////////////////////////////////////////////
     # Load the model
-    num_features = len([col for col in preprocessed_data.columns if col not in ['percent_change_classification', 'leg_direction', 'crypto', 't']])
-    num_classes = preprocessed_data['percent_change_classification'].nunique()
-    num_cryptos = len(TICKERS)
+#here
 
+
+
+    num_features = len(feature_cols)
+    num_cryptos = full_df['crypto'].nunique()
+    num_classes = full_df['percent_change_classification'].nunique()
+
+
+
+
+
+
+
+
+
+
+
+    
     model = ShortTermTransformerModel(
         num_features=num_features,
         num_cryptos=num_cryptos,
@@ -893,12 +913,11 @@ def preprocess_and_predict():
     # Step 4: Prepare data for prediction
     print("Preparing data for prediction...")
     # Assuming 'crypto' and 't' columns are present
-    feature_cols = [col for col in preprocessed_data.columns if col not in ['percent_change_classification', 'leg_direction', 'crypto', 't']]
     scaler = joblib.load('scaler.joblib')  # Load the scale
-    preprocessed_data[feature_cols] = scaler.transform(preprocessed_data[feature_cols])
+    full_df[feature_cols] = scaler.transform(full_df[feature_cols])
 
     # Create dataset and dataloader
-    prediction_dataset = CryptoDataset(preprocessed_data, feature_cols, window_size=80)
+    prediction_dataset = CryptoDataset(full_df, feature_cols, window_size=80)
     prediction_loader = DataLoader(prediction_dataset, batch_size=48, shuffle=False, num_workers=2)
 
     # Step 5: Make predictions
@@ -913,12 +932,12 @@ def preprocess_and_predict():
             predictions["leg_direction"].extend(leg_probs.argmax(dim=1).cpu().tolist())
 
     # Add predictions to the DataFrame
-    preprocessed_data['percent_change_prediction'] = predictions["percent_change"]
-    preprocessed_data['leg_direction_prediction'] = predictions["leg_direction"]
+    full_df['percent_change_prediction'] = predictions["percent_change"]
+    full_df['leg_direction_prediction'] = predictions["leg_direction"]
 
     # Save predictions for visualization
     os.makedirs('predictions', exist_ok=True)
-    preprocessed_data.to_csv('predictions/latest_predictions.csv', index=False)
+    full_df.to_csv('predictions/latest_predictions.csv', index=False)
     print("Predictions saved to 'predictions/latest_predictions.csv'.")
     return { "status": "success", "predictions": predictions }
 
