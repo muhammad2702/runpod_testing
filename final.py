@@ -971,7 +971,10 @@ def preprocess_and_predict():
     print("Predictions saved to 'predictions/latest_predictions.csv'.")
     print(predictions_df)
     predictions_dict = predictions_df.to_dict(orient="records")
-    return { "status": "success", "predictions": predictions_dict }
+    if len(predictions_dict) > 100:
+        predictions_dict = predictions_dict[100:]
+    return {"status": "success", "predictions": predictions_dict}
+
 
 def handler(job):
     # Access the input data from the job
