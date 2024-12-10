@@ -611,6 +611,12 @@ def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, devic
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            
+    if (idx + 1) % accumulation_steps != 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
 
     for key in epoch_losses:
         epoch_losses[key] /= total
