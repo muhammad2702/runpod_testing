@@ -972,7 +972,7 @@ def preprocess_and_predict():
     print(predictions_df)
     predictions_dict = predictions_df.to_dict(orient="records")
     if len(predictions_dict) > 100:
-        predictions_dict = predictions_dict[100:]
+        predictions_dict = predictions_dict[-100:]
     return {"status": "success", "predictions": predictions_dict}
 
 
