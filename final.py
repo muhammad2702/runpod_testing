@@ -3,11 +3,8 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-from tqdm import tqdm
-from datetime import datetime
 import numpy as np
 from ta import trend, momentum, volatility
-from sklearn.preprocessing import LabelEncoder
 import pickle
 import math
 import random
@@ -18,17 +15,29 @@ import torch.cuda.amp
 import gc
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader
 from torch.nn.init import xavier_uniform_ as xavier_uniform
-from tqdm import tqdm
 import matplotlib.pyplot as plt
-from sklearn.metrics import balanced_accuracy_score  # If you want to use balanced accuracy
-from torch.nn.init import xavier_uniform_
-from datetime import datetime, timedelta
-import runpod
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 import joblib
+import logging
+from backtesting import Backtest, Strategy
+from itertools import product
+import json  # For JSON serialization
+import sys   # To read input from stdin
+import runpod
 
-# Configuration
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Initialize Metrics Dictionary
+metrics_dict = {
+    "status": "pending",
+    "message": "",
+    "details": {}
+}
+
+# Configuration - Securely load API keys using environment variables
 API_KEY = 'de_kgSuhw6v4KnRK0wprJCoBAIhqSd5R'  # Replace with your actual API key
 BASE_URL = 'https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}'
 
@@ -56,17 +65,17 @@ TIMEFRAMES = [
     {'multiplier': 1, 'timespan': 'second'},
 ]
 
-# Date range for data collection
-
-# Directory to save the collected data
 DATA_DIR = 'crypto_data'
 os.makedirs(DATA_DIR, exist_ok=True)
 
-def daterange(start_date, end_date, delta):
-    current = start_date
-    while current <= end_date:
-        yield current
-        current += delta
+MODELS_DIR = 'models'
+SCALERS_DIR = 'scalers'
+PREDICTIONS_DIR = 'predictions'
+os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(SCALERS_DIR, exist_ok=True)
+os.makedirs(PREDICTIONS_DIR, exist_ok=True)
+
+
 
 def fetch_data(ticker, multiplier, timespan, from_date, to_date):
     url = BASE_URL.format(
@@ -79,16 +88,19 @@ def fetch_data(ticker, multiplier, timespan, from_date, to_date):
     params = {
         'adjusted': 'true',
         'sort': 'asc',
-        'limit': '50000',  # Maximum allowed by Polygon.io
+        'limit': '50000',
         'apiKey': API_KEY
     }
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
         data = response.json()
         return data.get('results', [])
-    else:
-        print(f"Error fetching data for {ticker} - {timespan}: {response.status_code} - {response.text}")
-        return []
+    except requests.exceptions.HTTPError as http_err:
+        logging.error(f"HTTP error occurred for {ticker} - {timespan}: {http_err}")
+    except Exception as err:
+        logging.error(f"Other error occurred for {ticker} - {timespan}: {err}")
+    return []
 
 def collect(START_DATE, END_DATE):
     start = datetime.strptime(START_DATE, '%Y-%m-%d')
@@ -104,313 +116,870 @@ def collect(START_DATE, END_DATE):
             filename = f"{ticker.replace(':', '_')}_{multiplier}{timespan}.csv"
             filepath = os.path.join(ticker_dir, filename)
 
-            print(f"Fetching data for {ticker} - {multiplier}{timespan}")
-
-            # To handle large date ranges, you might need to split the requests
-            # For simplicity, we'll attempt to fetch all data at once
+            logging.info(f"Fetching data for {ticker} - {multiplier}{timespan}")
             data = fetch_data(ticker, multiplier, timespan, start, end)
 
             if data:
                 df = pd.DataFrame(data)
-                # Convert timestamp to datetime
                 df['t'] = pd.to_datetime(df['t'], unit='ms')
-                # Save to CSV
                 df.to_csv(filepath, index=False)
-                print(f"Saved {len(df)} records to {filepath}")
+                logging.info(f"Saved {len(df)} records to {filepath}")
             else:
-                print(f"No data fetched for {ticker} - {multiplier}{timespan}")
+                logging.warning(f"No data fetched for {ticker} - {multiplier}{timespan}")
 
-            # Respect API rate limits
-            time.sleep(1)  # Adjust sleep time based on your rate limits
+            time.sleep(1)
 
 class CryptoDataPreprocessor:
     def __init__(self, raw_data_dir='crypto_data', preprocessed_data_dir='preprocessed_data', columns_to_add=None):
-        """
-        Initializes the CryptoDataPreprocessor.
-
-        :param raw_data_dir: Directory containing raw CSV data.
-        :param preprocessed_data_dir: Directory to save preprocessed data.
-        :param columns_to_add: List of columns to include in the final output.
-        """
         self.raw_data_dir = raw_data_dir
         self.preprocessed_data_dir = preprocessed_data_dir
-        self.columns_to_add = columns_to_add or ['leg_direction', 'close_price']  # Default columns
+        self.columns_to_add = columns_to_add or ['close_price']
         os.makedirs(self.preprocessed_data_dir, exist_ok=True)
-        self.label_encoders = {}
 
     def preprocess_file(self, df):
-        """
-        Applies preprocessing steps to the DataFrame.
-
-        :param df: pandas DataFrame with raw data.
-        :return: Preprocessed DataFrame and label encoders.
-        """
         required_columns = ['c', 'h', 'l']
         for col in required_columns:
             if col not in df.columns:
                 raise ValueError(f"Missing required column: {col}")
 
-        # Compute RSI
         rsi = momentum.RSIIndicator(close=df['c'], window=14)
         df['RSI'] = rsi.rsi()
 
-        # Compute MACD with smoothing
         macd = trend.MACD(close=df['c'], window_slow=26, window_fast=12, window_sign=9)
         df['MACD'] = macd.macd().rolling(window=3).mean()
         df['MACD_signal'] = macd.macd_signal().rolling(window=3).mean()
         df['MACD_diff'] = macd.macd_diff().rolling(window=3).mean()
 
-        # Compute ATR
         atr = volatility.AverageTrueRange(high=df['h'], low=df['l'], close=df['c'], window=14)
         df['ATR'] = atr.average_true_range().rolling(window=3).mean()
 
-        # Compute Bollinger Bands Width
         bollinger = volatility.BollingerBands(close=df['c'], window=20, window_dev=2)
         df['BB_upper'] = bollinger.bollinger_hband().rolling(window=3).mean()
         df['BB_lower'] = bollinger.bollinger_lband().rolling(window=3).mean()
         df['BB_width'] = ((df['BB_upper'] - df['BB_lower']) / df['c']).rolling(window=3).mean()
 
-        # Compute ADX with smoothing
         adx = trend.ADXIndicator(high=df['h'], low=df['l'], close=df['c'], window=14)
         df['ADX'] = adx.adx().rolling(window=3).mean()
 
-        # Drop initial rows with NaN values
         df.dropna(inplace=True)
-
-        # Classify Market Environments
-        df, label_encoders = self.classify_market_environments(df)
-
-        # Calculate Leg Data
-        df = self.calculate_leg_data(df)
-
-        # Classify Percent Change
-        df = self.classify_percent_change(df)
-        df['close_price'] = df['c']  # Assuming 'c' is the closing price
-
-        return df, label_encoders
-
-    def classify_market_environments(self, df):
-        """
-        Classify market environments into numerical categories for model training.
-
-        :param df: pandas DataFrame with technical indicators.
-        :return: DataFrame with new classification columns and label encoders.
-        """
-        df['ATR_mavg'] = df['ATR'].rolling(window=14).mean()
-        df['ATR_vol'] = np.where(df['ATR'] > 1.2 * df['ATR_mavg'], 'h',
-                                 np.where(df['ATR'] < 0.8 * df['ATR_mavg'], 'l', 'Medium'))
-
-        df['BB_mavg'] = df['BB_width'].rolling(window=20).mean()
-        df['BB_vol'] = np.where(df['BB_width'] > 1.2 * df['BB_mavg'], 'h',
-                                np.where(df['BB_width'] < 0.8 * df['BB_mavg'], 'l', 'Medium'))
-
-        df['daily_return'] = df['c'].pct_change()
-        df['RV'] = df['daily_return'].rolling(window=20).std() * np.sqrt(252)
-        rv_80 = df['RV'].quantile(0.8)
-        rv_20 = df['RV'].quantile(0.2)
-        df['RV_vol'] = np.where(df['RV'] > rv_80, 'h',
-                                np.where(df['RV'] < rv_20, 'l', 'Medium'))
-
-        df['Volatility'] = df[['ATR_vol', 'BB_vol', 'RV_vol']].mode(axis=1)[0]
-
-        df['Trend'] = np.where(
-            (df['MACD'] > df['MACD_signal']) & (df['MACD'] > 0), 'Bullish',
-            np.where(
-                (df['MACD'] < df['MACD_signal']) & (df['MACD'] < 0), 'Bearish', 'Neutral'
-            )
-        )
-
-        df['Trend_strength'] = np.where(df['ADX'] > 25, 'Strong', 'Weak')
-
-        df['Market_Environment'] = df.apply(
-            lambda row: f"{row['Volatility']} Vol/{row['Trend']}" if row['Trend_strength'] == 'Strong' else f"{row['Volatility']} Vol/Neutral",
-            axis=1
-        )
-
-        label_encoders = {}
-        categorical_columns = ['ATR_vol', 'BB_vol', 'RV_vol', 'Volatility', 'Trend', 'Trend_strength', 'Market_Environment']
-        for column in categorical_columns:
-            le = LabelEncoder()
-            df[column] = le.fit_transform(df[column].astype(str))
-            label_encoders[column] = le
-
-        self.label_encoders = label_encoders
-        return df, label_encoders
-
-    def calculate_leg_data(self, df):
-        df['percent_delta'] = df['c'].pct_change()
-        df = df.reset_index(drop=True)
-
-        previous_leg_change = 0
-        previous_leg_length = 0
-        current_leg_change = 0
-        current_leg_length = 0
-        current_direction = None
-
-        previous_changes = []
-        previous_lengths = []
-        current_changes = []
-        current_lengths = []
-        leg_directions = []
-
-        for i in range(len(df)):
-            if i == 0:
-                current_leg_change = 0
-                current_leg_length = 0
-                current_direction = 0  # Neutral at start
-            else:
-                percent_delta = df.at[i, 'percent_delta']
-                if current_leg_length == 0:
-                    current_leg_change = percent_delta
-                    current_leg_length = 1
-                    current_direction = 1 if percent_delta > 0 else 0
-                else:
-                    if (current_leg_change > 0 and percent_delta > 0) or (current_leg_change < 0 and percent_delta < 0):
-                        current_leg_change += percent_delta
-                        current_leg_length += 1
-                    else:
-                        previous_leg_change = current_leg_change
-                        previous_leg_length = current_leg_length
-                        current_leg_change = percent_delta
-                        current_leg_length = 1
-                        current_direction = 1 if percent_delta > 0 else 0
-            previous_changes.append(previous_leg_change)
-            previous_lengths.append(previous_leg_length)
-            current_changes.append(current_leg_change)
-            current_lengths.append(current_leg_length)
-            leg_directions.append(current_direction)
-
-        df['previous_leg_change'] = previous_changes
-        df['previous_leg_length'] = previous_lengths
-        df['current_leg_change'] = current_changes
-        df['current_leg_length'] = current_lengths
-        df['leg_direction'] = leg_directions
-
-        df.drop(columns=['percent_delta'], inplace=True)
-        return df
-
-    def classify_percent_change(self, df):
-        df['percent_change'] = df['c'].pct_change()
-        df.dropna(inplace=True)
-
-        percentiles = df['percent_change'].quantile([0.05, 0.20, 0.40, 0.60, 0.80, 0.95]).to_dict()
-
-        def classify(x, p):
-            if x < p[0.05]:
-                return 'Down a Lot'
-            elif x < p[0.20]:
-                return 'Down Moderate'
-            elif x < p[0.40]:
-                return 'Down a Little'
-            elif x < p[0.60]:
-                return 'No Change'
-            elif x < p[0.80]:
-                return 'Up a Little'
-            elif x < p[0.95]:
-                return 'Up Moderate'
-            else:
-                return 'Up a Lot'
-
-        df['percent_change_classification'] = df['percent_change'].apply(lambda x: classify(x, percentiles))
-
-        le = LabelEncoder()
-        df['percent_change_classification'] = le.fit_transform(df['percent_change_classification'].astype(str))
-        self.label_encoders['percent_change_classification'] = le
+        df['close_price'] = df['c']
 
         return df
 
     def save_preprocessed_data(self, df, filepath):
-        """
-        Saves the preprocessed DataFrame to a CSV file with selected columns.
-
-        :param df: pandas DataFrame with preprocessed data.
-        :param filepath: Path where the CSV will be saved.
-        """
         df[self.columns_to_add].to_csv(filepath, index=False)
-        print(f"Saved preprocessed data to {filepath}")
+        logging.info(f"Saved preprocessed data to {filepath}")
 
     def preprocess_all_files(self):
-        # Traverse the raw_data_dir
-        processed_tickers = []
-        for ticker in tqdm(os.listdir(self.raw_data_dir), desc='Processing Tickers'):
+        for ticker in os.listdir(self.raw_data_dir):
             ticker_raw_dir = os.path.join(self.raw_data_dir, ticker)
             ticker_preprocessed_dir = os.path.join(self.preprocessed_data_dir, ticker)
             
-            # Create or clean the preprocessed directory
             if os.path.exists(ticker_preprocessed_dir):
-                # Remove all existing files in the preprocessed directory
                 for old_file in os.listdir(ticker_preprocessed_dir):
                     old_file_path = os.path.join(ticker_preprocessed_dir, old_file)
-                    os.remove(old_file_path)
+                    try:
+                        os.remove(old_file_path)
+                        logging.debug(f"Removed old preprocessed file: {old_file_path}")
+                    except Exception as e:
+                        logging.error(f"Error removing file {old_file_path}: {e}")
             else:
                 os.makedirs(ticker_preprocessed_dir, exist_ok=True)
 
-            for file in tqdm(os.listdir(ticker_raw_dir), desc=f'Processing {ticker}', leave=False):
+            for file in os.listdir(ticker_raw_dir):
                 if file.endswith('.csv'):
                     raw_filepath = os.path.join(ticker_raw_dir, file)
                     preprocessed_filename = file.replace('.csv', '_preprocessed.csv')
                     preprocessed_filepath = os.path.join(ticker_preprocessed_dir, preprocessed_filename)
 
-                    # Read raw CSV
                     try:
                         df_raw = pd.read_csv(raw_filepath)
-                        # Ensure timestamp is datetime if needed
-                        if 'timestamp' in df_raw.columns and not pd.api.types.is_datetime64_any_dtype(df_raw['timestamp']):
-                            df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+                        if 't' in df_raw.columns and not pd.api.types.is_datetime64_any_dtype(df_raw['t']):
+                            df_raw['t'] = pd.to_datetime(df_raw['t'], errors='coerce')
                     except Exception as e:
-                        print(f"Error reading {raw_filepath}: {e}")
+                        logging.error(f"Error reading {raw_filepath}: {e}")
                         continue
 
-                    # Preprocess
+                    df_raw.dropna(subset=['t'], inplace=True)
+
                     try:
-                        df_preprocessed, label_encoders = self.preprocess_file(df_raw)  # Unpack the tuple
+                        df_preprocessed = self.preprocess_file(df_raw)
                     except Exception as e:
-                        print(f"Error preprocessing {raw_filepath}: {e}")
+                        logging.error(f"Error preprocessing {raw_filepath}: {e}")
                         continue
 
-                    # Print head of the DataFrame
-                    print(f"Preprocessed data for {file}:")
-                    print(df_preprocessed.head())  # Print the entire head without truncation
+                    logging.info(f"Preprocessed data for {file}:")
+                    print(df_preprocessed.head())
 
-                    # Save preprocessed data
                     self.save_preprocessed_data(df_preprocessed, preprocessed_filepath)
+                    logging.info(f"Saved preprocessed file to {preprocessed_filepath}")
 
-                    print(f"Saved preprocessed file to {preprocessed_filepath}")
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
 
-        processed_tickers_count = len(set(processed_tickers))
-        with open('processed_tickers_count.txt', 'w') as f:
-            f.write(str(processed_tickers_count))
-        print(f"Processed {processed_tickers_count} tickers and saved the count.")
+    def forward(self, x):
+        seq_length = x.size(1)
+        x = x + self.pe[:, :seq_length, :]
+        return x
 
-def preprocess():
-    """
-    Main function to preprocess cryptocurrency data.
-    """
-    # Define directories
-    raw_data_dir = 'crypto_data'
+class LiteFormer(nn.Module):
+    def __init__(self, d_model=128, nhead=8, num_encoder_layers=4, dim_feedforward=512, dropout=0.1, max_seq_length=80):
+        super(LiteFormer, self).__init__()
+        
+        self.d_model = d_model
+        self.input_linear = nn.Linear(1, d_model)
+        self.positional_encoding = PositionalEncoding(d_model, max_len=max_seq_length)
+        
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, activation='relu', batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        
+        self.output_layer = nn.Linear(d_model, 1)
+        self.dropout = nn.Dropout(dropout)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, src):
+        src = self.input_linear(src)
+        src = self.positional_encoding(src)
+        src = self.dropout(src)
+        
+        memory = self.transformer_encoder(src)
+        memory = torch.mean(memory, dim=1)
+        
+        out = self.output_layer(memory)
+        return out
+
+class CryptoDataset(Dataset):
+    def __init__(self, dataframe, window_size=80):
+        self.data = dataframe.sort_values('t').reset_index(drop=True)
+        self.window_size = window_size
+        self.length = len(self.data) - self.window_size - 1 if len(self.data) > self.window_size else 0
+
+    def __len__(self):
+        return max(self.length, 0)
+
+    def __getitem__(self, idx):
+        data = self.data.iloc[idx:idx+self.window_size]
+        features = data['close_price'].values.reshape(-1, 1)
+        target_idx = idx + self.window_size
+        target = self.data.iloc[target_idx]['close_price']
+        return torch.tensor(features, dtype=torch.float32), torch.tensor(target, dtype=torch.float32)
+
+def train(model, dataloader, criterion, optimizer, scheduler, scaler, device, accumulation_steps=2):
+    model.train()
+    epoch_loss = 0.0
+    total = 0
+    optimizer.zero_grad(set_to_none=True)
+
+    for idx, (inputs, targets) in enumerate(dataloader):
+        inputs = inputs.to(device)
+        targets = targets.to(device).unsqueeze(1)
+
+        with torch.cuda.amp.autocast():
+            outputs = model(inputs)
+            loss = criterion(outputs, targets) / accumulation_steps
+
+        scaler.scale(loss).backward()
+        epoch_loss += loss.item() * accumulation_steps * inputs.size(0)
+        total += inputs.size(0)
+
+        if (idx + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+    # Final step if not divisible by accumulation steps
+    if (idx + 1) % accumulation_steps != 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+
+    epoch_loss /= total if total > 0 else 1
+    return epoch_loss
+
+def validate(model, dataloader, criterion, device):
+    model.eval()
+    val_loss = 0.0
+    total = 0
+    all_preds = []
+    all_targets = []
+
+    with torch.no_grad():
+        for inputs, targets in dataloader:
+            inputs = inputs.to(device)
+            targets = targets.to(device).unsqueeze(1)
+
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+
+            val_loss += loss.item() * inputs.size(0)
+            total += inputs.size(0)
+
+            all_preds.extend(outputs.cpu().numpy().flatten())
+            all_targets.extend(targets.cpu().numpy().flatten())
+
+    val_loss /= total if total > 0 else 1
+    mae = mean_absolute_error(all_targets, all_preds) if len(all_targets)>0 else 0
+    rmse = math.sqrt(mean_squared_error(all_targets, all_preds)) if len(all_targets)>0 else 0
+    return val_loss, mae, rmse
+
+def plot_losses(train_losses, val_losses, save_path='loss_curve.png'):
+    epochs = range(1, len(train_losses) + 1)
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, train_losses, 'bo-', label='Training Loss')
+    plt.plot(epochs, val_losses, 'ro-', label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig(save_path)
+    plt.close()
+    logging.info(f"Loss curve saved to {save_path}")
+
+def main(crypto_metrics):
+    # Train a separate model for each crypto individually
+    batch_size = 48
+    epochs = 2
+    learning_rate = 5e-4
+    window_size = 80
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     preprocessed_data_dir = 'preprocessed_data'
+    cryptos = [d for d in os.listdir(preprocessed_data_dir) if os.path.isdir(os.path.join(preprocessed_data_dir, d))]
 
-    # Columns to include in the final output
-    columns_to_add = [
-        'leg_direction', 'close_price', 'o', 'l', 'h', 't', 'RSI', 'MACD', 'MACD_signal', 'MACD_diff',
-        'ATR', 'BB_width', 'ADX',  # , 'Volatility', 'Trend', 'Trend_strength',
-        'Market_Environment', 'percent_change_classification'  # 'previous_leg_change', 'previous_leg_length',
-        # 'current_leg_change', 'current_leg_length'
-    ]
+    for crypto in cryptos:
+        crypto_metrics[crypto] = {
+            "training_losses": [],
+            "validation_losses": [],
+            "test_metrics": {},
+            "backtest_results": {}
+        }
 
-    # Initialize the preprocessor
-    preprocessor = CryptoDataPreprocessor(
-        raw_data_dir=raw_data_dir,
-        preprocessed_data_dir=preprocessed_data_dir,
-        columns_to_add=columns_to_add
+        # Load preprocessed CSV files for this crypto
+        ticker_dir = os.path.join(preprocessed_data_dir, crypto)
+        csv_files = [f for f in os.listdir(ticker_dir) if f.endswith('_preprocessed.csv')]
+        if not csv_files:
+            logging.warning(f"No preprocessed data found for {crypto}. Skipping.")
+            continue
+
+        # Concatenate all files for this crypto
+        df_list = []
+        for f in csv_files:
+            fp = os.path.join(ticker_dir, f)
+            df = pd.read_csv(fp)
+            df['crypto'] = crypto
+            df_list.append(df)
+        full_df = pd.concat(df_list, ignore_index=True)
+        full_df.dropna(subset=['close_price'], inplace=True)
+
+        if len(full_df) <= window_size:
+            logging.warning(f"Not enough data for {crypto} to train. Skipping.")
+            continue
+
+        # Split data
+        train_size = int(0.7 * len(full_df))
+        val_size = int(0.15 * len(full_df))
+        train_df = full_df.iloc[:train_size].copy()
+        val_df = full_df.iloc[train_size:train_size+val_size].copy()
+        test_df = full_df.iloc[train_size+val_size:].copy()
+
+        # Scale individually for this crypto
+        scaler = StandardScaler()
+        scaler.fit(train_df[['close_price']])
+        train_df['close_price'] = scaler.transform(train_df[['close_price']])
+        val_df['close_price'] = scaler.transform(val_df[['close_price']])
+        test_df['close_price'] = scaler.transform(test_df[['close_price']])
+        
+        # Save scaler
+        scaler_path = os.path.join(SCALERS_DIR, f'{crypto}_scaler.joblib')
+        joblib.dump(scaler, scaler_path)
+        logging.info(f"Scaler for {crypto} saved to {scaler_path}")
+
+        # Create datasets
+        train_dataset = CryptoDataset(train_df, window_size)
+        val_dataset = CryptoDataset(val_df, window_size)
+        test_dataset = CryptoDataset(test_df, window_size)
+
+        if len(train_dataset) == 0:
+            logging.warning(f"No training samples for {crypto} after windowing. Skipping.")
+            continue
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+
+        # Initialize model
+        model = LiteFormer(
+            d_model=128,
+            nhead=8,
+            num_encoder_layers=4,
+            dim_feedforward=512,
+            dropout=0.1,
+            max_seq_length=window_size
+        ).to(device)
+        logging.info(f"LiteFormer model initialized for {crypto}.")
+
+        criterion = nn.MSELoss()
+        optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.0001)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        scaler_amp = torch.cuda.amp.GradScaler()
+
+        best_val_loss = float('inf')
+        best_model_state = None
+        patience_counter = 0
+        early_stopping_patience = 15
+
+        train_losses = []
+        val_losses = []
+
+        for epoch in range(epochs):
+            print(f"\nEpoch {epoch + 1}/{epochs} for {crypto}")
+            train_loss = train(model, train_loader, criterion, optimizer, scheduler, scaler_amp, device, accumulation_steps=2)
+            train_losses.append(train_loss)
+            print(f"Training Loss: {train_loss:.4f}")
+            crypto_metrics[crypto]["training_losses"].append(train_loss)
+
+            val_loss, val_mae, val_rmse = validate(model, val_loader, criterion, device)
+            val_losses.append(val_loss)
+            print(f"Validation Loss: {val_loss:.4f}, MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}")
+            crypto_metrics[crypto]["validation_losses"].append({
+                "val_loss": val_loss,
+                "mae": val_mae,
+                "rmse": val_rmse
+            })
+
+            scheduler.step(val_loss)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model_state = model.state_dict().copy()
+                patience_counter = 0
+                logging.info(f"New best model for {crypto} saved with validation loss: {best_val_loss:.4f}")
+            else:
+                patience_counter += 1
+                if patience_counter > early_stopping_patience:
+                    logging.info("Early stopping triggered.")
+                    break
+
+            gc.collect()
+
+        # Plot losses if you like
+        plot_path = f'loss_curve_{crypto}.png'
+        plot_losses(train_losses, val_losses, save_path=plot_path)
+
+        # Save the best model
+        if best_model_state is not None:
+            model_path = os.path.join(MODELS_DIR, f'best_liteformer_model_{crypto}.pth')
+            torch.save(best_model_state, model_path)
+            logging.info(f"Best model for {crypto} saved as {model_path}")
+            model.load_state_dict(best_model_state)
+        else:
+            logging.warning(f"No improvement during training for {crypto}, model not saved.")
+
+        # Final evaluation
+        test_loss, test_mae, test_rmse = validate(model, test_loader, criterion, device)
+        print(f"\nFinal Test Results for {crypto}:")
+        print(f"Test Loss: {test_loss:.4f}, MAE: {test_mae:.4f}, RMSE: {test_rmse:.4f}")
+        crypto_metrics[crypto]["test_metrics"] = {
+            "test_loss": test_loss,
+            "mae": test_mae,
+            "rmse": test_rmse
+        }
+
+        del model
+        torch.cuda.empty_cache()
+
+def preprocess_and_predict(TICKERS):
+    collect(START_DATE, END_DATE, TICKERS, TIMEFRAMES)
+    preprocess = CryptoDataPreprocessor(
+        raw_data_dir='crypto_data',
+        preprocessed_data_dir='preprocessed_data',
+        columns_to_add=['close_price', 't']
     )
+    preprocess.preprocess_all_files()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Process all files
-    print("Starting preprocessing...")
-    preprocessor.preprocess_all_files()
-    print("Preprocessing completed.")
+    preprocessed_data_dir = 'preprocessed_data'
+    cryptos = [d for d in os.listdir(preprocessed_data_dir) if os.path.isdir(os.path.join(preprocessed_data_dir, d))]
 
-# Set seeds for reproducibility
+    all_predictions = []
+    for crypto in cryptos:
+        ticker_dir = os.path.join(preprocessed_data_dir, crypto)
+        csv_files = [f for f in os.listdir(ticker_dir) if f.endswith('_preprocessed.csv')]
+        if not csv_files:
+            logging.warning(f"No preprocessed data found for prediction: {crypto}. Skipping.")
+            continue
+
+        df_list = []
+        for f in csv_files:
+            fp = os.path.join(ticker_dir, f)
+            try:
+                df = pd.read_csv(fp)
+                df['crypto'] = crypto
+                df_list.append(df)
+            except Exception as e:
+                logging.error(f"Error reading {fp}: {e}")
+                continue
+        if not df_list:
+            continue
+
+        full_df = pd.concat(df_list, ignore_index=True)
+        full_df.dropna(subset=['close_price'], inplace=True)
+        if len(full_df) <= 80:
+            logging.warning(f"Not enough data for prediction: {crypto}. Skipping.")
+            continue
+
+        # Load scaler for this crypto
+        scaler_path = os.path.join(SCALERS_DIR, f'{crypto}_scaler.joblib')
+        if not os.path.exists(scaler_path):
+            logging.warning(f"No scaler found for {crypto}. Skipping prediction.")
+            continue
+        scaler = joblib.load(scaler_path)
+        full_df['close_price'] = scaler.transform(full_df[['close_price']])
+
+        # Dataset and DataLoader
+        test_dataset = CryptoDataset(full_df, window_size=80)
+        if len(test_dataset) == 0:
+            logging.warning(f"No samples for prediction: {crypto}. Skipping.")
+            continue
+        test_loader = DataLoader(test_dataset, batch_size=48, shuffle=False, num_workers=2)
+
+        # Load model
+        model_path = os.path.join(MODELS_DIR, f'best_liteformer_model_{crypto}.pth')
+        if not os.path.exists(model_path):
+            logging.warning(f"No model found for {crypto}. Skipping prediction.")
+            continue
+
+        model = LiteFormer(
+            d_model=128,
+            nhead=8,
+            num_encoder_layers=4,
+            dim_feedforward=512,
+            dropout=0.1,
+            max_seq_length=80
+        ).to(device)
+
+        try:
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            model.eval()
+        except Exception as e:
+            logging.error(f"Error loading model for {crypto}: {e}")
+            continue
+
+        predictions = []
+        prediction_timestamps = []
+
+        with torch.no_grad():
+            for inputs, _ in test_loader:
+                inputs = inputs.to(device)
+                outputs = model(inputs)
+                outputs = outputs.cpu().numpy().flatten()
+                predictions.extend(outputs.tolist())
+
+                start_index = len(predictions) - len(outputs)
+                end_index = start_index + len(outputs)
+                # Align timestamps
+                corresponding_timestamps = full_df['t'].iloc[start_index + 80:end_index + 80].tolist()
+                prediction_timestamps.extend(corresponding_timestamps)
+
+        # Create predictions_df
+        predictions_df = pd.DataFrame({
+            't': prediction_timestamps,
+            'crypto': full_df['crypto'].iloc[80:80 + len(predictions)].tolist(),
+            'predicted_close_price': predictions
+        })
+
+        # Inverse transform predictions
+        predictions_df['predicted_close_price'] = scaler.inverse_transform(predictions_df[['predicted_close_price']])
+
+        # Retrieve true close prices for comparison
+        true_close_prices = full_df['close_price'].iloc[80:80 + len(predictions)]
+        true_close_prices = scaler.inverse_transform(true_close_prices.values.reshape(-1, 1)).flatten()
+
+        # Compute metrics
+        if len(true_close_prices) > 0:
+            mae = mean_absolute_error(true_close_prices, predictions_df['predicted_close_price'])
+            rmse = math.sqrt(mean_squared_error(true_close_prices, predictions_df['predicted_close_price']))
+        else:
+            mae = 0
+            rmse = 0
+
+        print(f"Prediction MAE for {crypto}: {mae:.4f}, RMSE: {rmse:.4f}")
+
+        # Add classification columns
+        last_actual_close = true_close_prices
+        predictions_df['direction'] = np.where(predictions_df['predicted_close_price'] > last_actual_close, 'Up', 'Down')
+        predictions_df['percentage_change'] = ((predictions_df['predicted_close_price'] - last_actual_close) / last_actual_close) * 100
+        predictions_df['last_actual_close'] = last_actual_close
+
+        def categorize_change(pc):
+            if pc >= 2:
+                return 'Significant Up'
+            elif 0.5 <= pc < 2:
+                return 'Moderate Up'
+            elif -0.5 < pc < 0.5:
+                return 'No Change'
+            elif -2 < pc <= -0.5:
+                return 'Moderate Down'
+            else:
+                return 'Significant Down'
+
+        predictions_df['change_category'] = predictions_df['percentage_change'].apply(categorize_change)
+        predictions_df['percentage_change'] = predictions_df['percentage_change'].round(2)
+
+        # Save per-crypto predictions
+        crypto_prediction_path = os.path.join(PREDICTIONS_DIR, f'{crypto}_latest_predictions.csv')
+        predictions_df.to_csv(crypto_prediction_path, index=False)
+        logging.info(f"Predictions for {crypto} saved to {crypto_prediction_path}")
+
+        all_predictions.append(predictions_df)
+
+    # Merge all predictions into one file if desired
+    if all_predictions:
+        final_predictions_df = pd.concat(all_predictions, ignore_index=True)
+        final_path = os.path.join(PREDICTIONS_DIR, 'all_latest_predictions.csv')
+        final_predictions_df.to_csv(final_path, index=False)
+        logging.info(f"All predictions combined saved to {final_path}")
+        print(final_predictions_df.head())
+
+    return {"status": "success", "message": "Predictions completed."}
+
+def prepare_backtest_data(predictions_df):
+    """
+    Prepares the DataFrame for backtesting by creating OHLC data.
+    """
+    df = predictions_df.copy()
+
+    # Create OHLC data required by Backtesting.py
+    # Since only 'last_actual_close' is available, we'll make assumptions:
+    df['Open'] = df['last_actual_close'].shift(1)
+    df['High'] = df[['last_actual_close', 'predicted_close_price']].max(axis=1)
+    df['Low'] = df[['last_actual_close', 'predicted_close_price']].min(axis=1)
+    df['Close'] = df['last_actual_close']
+    df['Volume'] = 1  # Placeholder, as volume data is not provided
+
+    df.dropna(inplace=True)  # Remove any NaN values resulting from shifts
+
+    # Reset index to make 't' a column again
+    df.reset_index(inplace=True)
+
+    # Define market environments (Customize as per your project)
+    # Placeholder: Define market_env based on percentage_change
+    def define_market_env(row):
+        if row['percentage_change'] > 3.5:
+            return 'bull'
+        elif row['percentage_change'] < -3.5:
+            return 'bear'
+        else:
+            return 'sideways'
+
+    df['market_env'] = df.apply(define_market_env, axis=1)
+
+    # Set 't' as index again for Backtesting.py
+    df.set_index('t', inplace=True)
+
+    return df
+
+# =========================
+# Strategy Definitions
+# =========================
+
+# Strategy 1: Buy on Maximum Classification, Take Profit, and Stop Loss
+class Strategy1(Strategy):
+    def init(self):
+        pass
+
+    def next(self):
+        max_class = 'Significant Up'
+
+        if self.data.change_category[-1] == max_class:
+            if not self.position:
+                tp = self.data.Close[-1] * (1 + self.data.percentage_change[-1] / 100)
+                sl = self.data.Close[-1] * (1 - (self.data.percentage_change[-1] / 200))  # Half the TP
+                self.buy(sl=sl, tp=tp)
+        else:
+            if self.position:
+                self.position.close()
+
+# Strategy 2: Buy on Maximum Classification, No Stop Loss
+class Strategy2(Strategy):
+    def init(self):
+        pass
+
+    def next(self):
+        max_class = 'Significant Up'
+
+        if self.data.change_category[-1] == max_class:
+            if not self.position:
+                tp = self.data.Close[-1] * (1 + self.data.percentage_change[-1] / 100)
+                self.buy(tp=tp)  # Only take profit, no stop loss
+        else:
+            if self.position:
+                self.position.close()
+
+# Strategy 3: Performance in Different Market Environments
+class Strategy3Base(Strategy):
+    def init(self):
+        pass
+
+    def next(self):
+        max_class = 'Significant Up'
+
+        if self.data.change_category[-1] == max_class:
+            if not self.position:
+                self.buy()
+        else:
+            if self.position:
+                self.position.close()
+
+# Strategy 4: Buy on Max Gains, Hold on Up, Sell on Down with Multiple TP and SL Levels
+class Strategy4(Strategy):
+    tp_levels = [1.02, 1.05, 1.10]  # 2%, 5%, 10%
+    sl_levels = [0.98, 0.95, 0.90]  # 2%, 5%, 10%
+
+    def init(self):
+        pass
+
+    def next(self):
+        max_class = 'Significant Up'
+        current_change_category = self.data.change_category[-1]
+        current_direction = self.data.direction[-1]
+
+        if self.data.change_category[-1] == max_class:
+            if not self.position:
+                entry_price = self.data.Close[-1]
+                self.buy()
+                # Set multiple take profits and stop losses
+                for tp, sl in zip(self.tp_levels, self.sl_levels):
+                    take_profit = entry_price * tp
+                    stop_loss = entry_price * sl
+                    self.position.exit(tp=take_profit, sl=stop_loss)
+
+        elif current_direction == 'Down':
+            if self.position:
+                self.position.close()
+        # If prediction is 'Up' but not max_class, hold (no action needed)
+
+# Strategy 5: Optimize Stop Loss and Take Profit Across Market Environments
+class Strategy5Optimized(Strategy):
+    tp = 1.05  # Placeholder, to be set during optimization
+    sl = 0.95
+
+    def init(self):
+        pass
+
+    def next(self):
+        max_class = 'Significant Up'
+
+        if self.data.change_category[-1] == max_class:
+            if not self.position:
+                tp = self.tp
+                sl = self.sl
+                self.buy(sl=sl, tp=tp)
+        else:
+            if self.position:
+                self.position.close()
+
+# =========================
+# Backtesting Execution
+# =========================
+
+def run_backtests(df, crypto_metrics):
+    """
+    Runs backtests for all five strategies and outputs the results.
+    """
+    # Initialize cash and commission
+    initial_cash = 10000
+    commission = 0.002  # 0.2%
+
+    # Strategy 1 Backtest
+    bt1 = Backtest(df, Strategy1, cash=initial_cash, commission=commission, exclusive_orders=True)
+    stats1 = bt1.run()
+    logging.info("Strategy 1 Results:")
+    logging.info(stats1)
+    crypto_metrics["backtest_results"] = crypto_metrics.get("backtest_results", {})
+    crypto_metrics["backtest_results"]["Strategy1"] = stats1.to_dict()
+
+    # Strategy 2 Backtest
+    bt2 = Backtest(df, Strategy2, cash=initial_cash, commission=commission, exclusive_orders=True)
+    stats2 = bt2.run()
+    logging.info("\nStrategy 2 Results:")
+    logging.info(stats2)
+    crypto_metrics["backtest_results"]["Strategy2"] = stats2.to_dict()
+
+    # Strategy 3 Backtest: Separate by Market Environment
+    market_envs = df['market_env'].unique()
+    crypto_metrics["backtest_results"]["Strategy3"] = {}
+    logging.info("\nStrategy 3 Results by Market Environment:")
+    for env in market_envs:
+        env_df = df[df['market_env'] == env]
+        if env_df.empty:
+            continue
+        bt3 = Backtest(env_df, Strategy3Base, cash=initial_cash, commission=commission, exclusive_orders=True)
+        stats3 = bt3.run()
+        logging.info(f"\nMarket Environment: {env}")
+        logging.info(stats3)
+        crypto_metrics["backtest_results"]["Strategy3"][env] = stats3.to_dict()
+
+    # Strategy 4 Backtest
+    bt4 = Backtest(df, Strategy4, cash=initial_cash, commission=commission, exclusive_orders=True)
+    stats4 = bt4.run()
+    logging.info("\nStrategy 4 Results:")
+    logging.info(stats4)
+    crypto_metrics["backtest_results"]["Strategy4"] = stats4.to_dict()
+
+    # Strategy 5 Backtest: Optimize TP and SL
+    best_profit = -float('inf')
+    best_tp = None
+    best_sl = None
+
+    tp_range = [1.02, 1.05, 1.10]
+    sl_range = [0.98, 0.95, 0.90]
+
+    logging.info("\nOptimizing Strategy 5...")
+
+    for tp, sl in product(tp_range, sl_range):
+        # Define a dynamic Strategy5 with current tp and sl
+        class OptimizedStrategy(Strategy):
+            tp = tp
+            sl = sl
+
+            def init(self):
+                pass
+
+            def next(self):
+                max_class = 'Significant Up'
+
+                if self.data.change_category[-1] == max_class:
+                    if not self.position:
+                        entry_price = self.data.Close[-1]
+                        self.buy(sl=self.data.Close[-1] * self.sl, tp=self.data.Close[-1] * self.tp)
+                else:
+                    if self.position:
+                        self.position.close()
+
+        bt5 = Backtest(df, OptimizedStrategy, cash=initial_cash, commission=commission, exclusive_orders=True)
+        stats5 = bt5.run()
+
+        if stats5['Return [%]'] > best_profit:
+            best_profit = stats5['Return [%]']
+            best_tp = tp
+            best_sl = sl
+
+    logging.info(f"Best TP: {best_tp}, Best SL: {best_sl}, Profit: {best_profit}%")
+
+    # Backtest with the best TP and SL
+    class BestStrategy(Strategy):
+        tp = best_tp
+        sl = best_sl
+
+        def init(self):
+            pass
+
+        def next(self):
+            max_class = 'Significant Up'
+
+            if self.data.change_category[-1] == max_class:
+                if not self.position:
+                    entry_price = self.data.Close[-1]
+                    self.buy(sl=self.sl, tp=self.tp)
+            else:
+                if self.position:
+                    self.position.close()
+
+    bt_best = Backtest(df, BestStrategy, cash=initial_cash, commission=commission, exclusive_orders=True)
+    final_stats = bt_best.run()
+    logging.info("\nStrategy 5 (Optimized) Results:")
+    logging.info(final_stats)
+    crypto_metrics["backtest_results"]["Strategy5"] = final_stats.to_dict()
+
+    # =========================
+    # Summary of All Strategies
+    # =========================
+
+    logging.info("\n=== Summary of All Strategies ===\n")
+    logging.info("Strategy 1:")
+    logging.info(stats1)
+    logging.info("\nStrategy 2:")
+    logging.info(stats2)
+    logging.info("\nStrategy 4:")
+    logging.info(stats4)
+    logging.info("\nStrategy 5 (Optimized):")
+    logging.info(final_stats)
+
+def handler(job):
+    job_input = job.get("input", {})
+    
+    # Retrieve the 'START_DATE' and 'END_DATE' values
+    START_DATE = job_input.get("START_DATE", "")
+    print(f"START_DATE :  {START_DATE}")
+    END_DATE = job_input.get("END_DATE", "")
+    print(f"END_DATE :  {END_DATE}")
+
+    collect(START_DATE, END_DATE)
+    # Uncomment if you want to run these steps
+    preprocess = CryptoDataPreprocessor(
+         raw_data_dir='crypto_data',
+         preprocessed_data_dir='preprocessed_data',
+         columns_to_add=['close_price', 't']
+     )
+    preprocess.preprocess_all_files()
+
+    crypto_metrics = {}
+    main(crypto_metrics)
+
+    # Step 2: Predictions
+    prediction_status = preprocess_and_predict(TICKERS)
+    if prediction_status["status"] != "success":
+        logging.error("Prediction step failed. Exiting.")
+        metrics_dict["status"] = "failed"
+        metrics_dict["message"] = "Prediction step failed."
+        print(json.dumps(metrics_dict))
+
+    # Step 3: Load the combined predictions
+    all_predictions_path = os.path.join(PREDICTIONS_DIR, 'all_latest_predictions.csv')
+    if not os.path.exists(all_predictions_path):
+        logging.error(f"Combined predictions file not found at {all_predictions_path}. Exiting.")
+        metrics_dict["status"] = "failed"
+        metrics_dict["message"] = f"Combined predictions file not found at {all_predictions_path}."
+        print(json.dumps(metrics_dict))
+
+    predictions_df = pd.read_csv(all_predictions_path)
+    metrics_dict["preds"] = predictions_df
+    # Step 4: Prepare data for backtesting
+    backtest_df = prepare_backtest_data(predictions_df)
+    logging.info(backtest_df.head())
+
+    # Step 5: Run Backtests
+    run_backtests(backtest_df, crypto_metrics)
+
+    # Step 6: Aggregate Metrics
+    metrics_dict["status"] = "success"
+    metrics_dict["message"] = "Processing completed successfully."
+    metrics_dict["details"] = crypto_metrics
+    return json.dumps(metrics_dict)
+
+
+    
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -421,578 +990,9 @@ def set_seed(seed=42):
 
 set_seed(42)
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha  # Tensor of shape [num_classes], or None
-        self.gamma = gamma
-        self.reduction = reduction
 
-    def forward(self, inputs, targets):
-        # inputs: [batch_size, num_classes]
-        # targets: [batch_size]
-        log_probs = nn.functional.log_softmax(inputs, dim=1)
-        probs = torch.exp(log_probs)
-
-        # Gather the log probability of the target class only
-        batch_indices = torch.arange(len(targets), dtype=torch.long, device=targets.device)
-        pt = probs[batch_indices, targets]       # shape: [batch_size]
-        log_pt = log_probs[batch_indices, targets]  # shape: [batch_size]
-
-        # Apply alpha if provided
-        if self.alpha is not None:
-            # alpha is [num_classes], select alpha for each target
-            at = self.alpha[targets]  # shape: [batch_size]
-        else:
-            at = 1.0
-
-        # Compute focal loss
-        # FL = -alpha_t * (1 - p_t)^gamma * log(p_t)
-        focal_loss = -at * ((1 - pt) ** self.gamma) * log_pt
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
-
-class ShortTermTransformerModel(nn.Module):
-    def __init__(self, num_features, num_cryptos, d_model=64, nhead=2, num_encoder_layers=1,
-                 dim_feedforward=64, dropout=0.1, num_classes=7, max_seq_length=50):
-        super(ShortTermTransformerModel, self).__init__()
-        self.d_model = d_model
-        self.crypto_embedding = nn.Embedding(num_cryptos, d_model)
-        
-        self.input_linear = nn.Sequential(
-            nn.Linear(num_features, d_model),
-            nn.PReLU(),
-            nn.LayerNorm(d_model)
-        )
-        
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            norm_first=True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
-        
-        self.percent_change_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.PReLU(),
-            nn.LayerNorm(d_model),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, num_classes)
-        )
-
-        self.leg_direction_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.PReLU(),
-            nn.LayerNorm(d_model),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 2)
-        )
-
-        self.initialize_weights()
-
-    def forward(self, src, crypto_id):
-        # Transform input features and add crypto embedding
-        src = self.input_linear(src)
-        crypto_emb = self.crypto_embedding(crypto_id).unsqueeze(1)
-        src = src + crypto_emb
-
-        # Pass through Transformer
-        memory = self.transformer_encoder(src)
-        # Global average pooling over the sequence dimension
-        features = torch.mean(memory, dim=1)
-
-        # Compute logits
-        percent_logits = self.percent_change_head(features)
-        leg_logits = self.leg_direction_head(features)
-        return percent_logits, leg_logits
-
-    def initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                xavier_uniform(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Embedding):
-                nn.init.uniform_(m.weight, -0.1, 0.1)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-
-class CryptoDataset(Dataset):
-    def __init__(self, dataframe, feature_cols, window_size=60):
-        self.data = dataframe
-        self.feature_cols = feature_cols
-        self.window_size = window_size
-        self.cryptos = sorted(dataframe['crypto'].unique())
-        self.crypto_to_id = {crypto: idx for idx, crypto in enumerate(self.cryptos)}
-        self.crypto_data = {
-            crypto: dataframe[dataframe['crypto'] == crypto].sort_values('t').reset_index(drop=True)
-            for crypto in self.cryptos
-        }
-
-        self.indices = []
-        for crypto in self.cryptos:
-            data_length = len(self.crypto_data[crypto])
-            if data_length > self.window_size:
-                self.indices.extend([(crypto, idx) for idx in range(data_length - self.window_size)])
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        crypto, seq_start = self.indices[idx]
-        data = self.crypto_data[crypto].iloc[seq_start:seq_start + self.window_size]
-        features = data[self.feature_cols].values
-
-        target_idx = seq_start + self.window_size
-        data_length = len(self.crypto_data[crypto])
-        if target_idx >= data_length:
-            target_idx = data_length - 1
-
-        percent_change = self.crypto_data[crypto].iloc[target_idx]['percent_change_classification']
-        leg_direction = self.crypto_data[crypto].iloc[target_idx]['leg_direction']
-
-        crypto_id = self.crypto_to_id[crypto]
-
-        return (
-            (torch.tensor(features, dtype=torch.float32), torch.tensor(crypto_id, dtype=torch.long)),
-            (
-                torch.tensor(percent_change, dtype=torch.long),
-                torch.tensor(leg_direction, dtype=torch.long),
-            ),
-        )
-
-def train(model, dataloader, criterion_dict, optimizer, scheduler, scaler, device, accumulation_steps=2):
-    model.train()
-    epoch_losses = {"percent_change": 0, "leg_direction": 0, "total": 0}
-    metrics = {"percent_change_acc": 0, "leg_direction_acc": 0}
-    total = 0
-
-    optimizer.zero_grad(set_to_none=True)
-
-    for idx, ((inputs, crypto_ids), (percent_targets, leg_targets)) in enumerate(tqdm(dataloader, desc="Training")):
-        inputs = inputs.to(device)
-        crypto_ids = crypto_ids.to(device)
-        percent_targets = percent_targets.to(device)
-        leg_targets = leg_targets.to(device)
-        
-        with torch.cuda.amp.autocast():
-            percent_out, leg_out = model(inputs, crypto_ids)
-
-            loss_percent = criterion_dict['percent_ce'](percent_out, percent_targets)
-            loss_leg = criterion_dict['leg_ce'](leg_out, leg_targets)
-            
-            total_loss = (0.6 * loss_percent + 0.4 * loss_leg) / accumulation_steps
-        
-        scaler.scale(total_loss).backward()
-
-        batch_size = inputs.size(0)
-        total += batch_size
-        
-        epoch_losses["percent_change"] += loss_percent.item() * batch_size
-        epoch_losses["leg_direction"] += loss_leg.item() * batch_size
-        epoch_losses["total"] += (total_loss.item() * batch_size * accumulation_steps)
-        
-        _, predicted_percent = torch.max(percent_out, 1)
-        _, predicted_leg = torch.max(leg_out, 1)
-        metrics["percent_change_acc"] += (predicted_percent == percent_targets).sum().item()
-        metrics["leg_direction_acc"] += (predicted_leg == leg_targets).sum().item()
-        
-        if (idx + 1) % accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad(set_to_none=True)
-            
-    if (idx + 1) % accumulation_steps != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
-
-    for key in epoch_losses:
-        epoch_losses[key] /= total
-
-    metrics["percent_change_acc"] /= total
-    metrics["leg_direction_acc"] /= total
-
-    return epoch_losses, metrics
-
-def validate(model, dataloader, criterion_dict, device):
-    model.eval()
-    val_losses = {"percent_change": 0, "leg_direction": 0, "total": 0}
-    val_metrics = {"percent_change_acc": 0, "leg_direction_acc": 0}
-    total = 0
-
-    with torch.no_grad():
-        all_percent_preds = []
-        all_percent_tgts = []
-        all_leg_preds = []
-        all_leg_tgts = []
-        
-        for (inputs, crypto_ids), (percent_targets, leg_targets) in tqdm(dataloader, desc="Validation"):
-            inputs = inputs.to(device)
-            crypto_ids = crypto_ids.to(device)
-            percent_targets = percent_targets.to(device)
-            leg_targets = leg_targets.to(device)
-
-            percent_out, leg_out = model(inputs, crypto_ids)
-
-            loss_percent = criterion_dict['percent_ce'](percent_out, percent_targets)
-            loss_leg = criterion_dict['leg_ce'](leg_out, leg_targets)
-            total_loss = 0.6 * loss_percent + 0.4 * loss_leg
-
-            batch_size = inputs.size(0)
-            total += batch_size
-
-            val_losses["percent_change"] += loss_percent.item() * batch_size
-            val_losses["leg_direction"] += loss_leg.item() * batch_size
-            val_losses["total"] += total_loss.item() * batch_size
-
-            _, predicted_percent = torch.max(percent_out, 1)
-            _, predicted_leg = torch.max(leg_out, 1)
-            val_metrics["percent_change_acc"] += (predicted_percent == percent_targets).sum().item()
-            val_metrics["leg_direction_acc"] += (predicted_leg == leg_targets).sum().item()
-
-            # For optional balanced accuracy
-            all_percent_preds.extend(predicted_percent.cpu().numpy())
-            all_percent_tgts.extend(percent_targets.cpu().numpy())
-
-    for key in val_losses:
-        val_losses[key] /= total
-
-    val_metrics["percent_change_acc"] /= total
-    val_metrics["leg_direction_acc"] /= total
-
-    # Example: Compute balanced accuracy for percent_change_classification (optional)
-    # ba_percent = balanced_accuracy_score(all_percent_tgts, all_percent_preds)
-    # print("Balanced Accuracy (Percent Change):", ba_percent)
-
-    return val_losses, val_metrics
-
-def compute_class_weights(df, target_col):
-    class_counts = df[target_col].value_counts().sort_index()
-    total = class_counts.sum()
-    weights = [total / (len(class_counts) * c) for c in class_counts]
-    return torch.tensor(weights, dtype=torch.float)
-
-def main():
-    # Parameters
-    batch_size = 48
-    epochs = 100
-    learning_rate = 5e-4
-    window_size = 80
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    preprocessed_data_dir = 'preprocessed_data'
-    dfs = []
-    for ticker in os.listdir(preprocessed_data_dir):
-        ticker_dir = os.path.join(preprocessed_data_dir, ticker)
-        if os.path.isdir(ticker_dir):
-            for file in os.listdir(ticker_dir):
-                if file.endswith('_preprocessed.csv'):
-                    filepath = os.path.join(ticker_dir, file)
-                    df = pd.read_csv(filepath)
-                    df['crypto'] = ticker
-                    dfs.append(df)
-
-    full_df = pd.concat(dfs, ignore_index=True)
-    print("::full_df:")
-    print(full_df)
-
-    target_cols = ['percent_change_classification', 'leg_direction']
-    feature_cols = [col for col in full_df.columns if col not in target_cols + ['t', 'crypto']]
-
-    # Drop NaN
-    full_df.dropna(subset=feature_cols + target_cols, inplace=True)
-
-    # Normalize features
-    scaler = StandardScaler()
-    full_df[feature_cols] = scaler.fit_transform(full_df[feature_cols])
-    joblib.dump(scaler, 'scaler.joblib')  # Save the scaler
-    # Avoid shuffling before splitting
-    full_df = full_df.sort_values('t').reset_index(drop=True)  # Ensure data is sorted by time
-
-    train_size = int(0.7 * len(full_df))
-    val_size = int(0.15 * len(full_df))
-
-    train_df = full_df.iloc[:train_size]
-    val_df = full_df.iloc[train_size:train_size+val_size]
-    test_df = full_df.iloc[train_size+val_size:]
-
-    # Print class distributions
-    print("Percent change class distribution:")
-    print(train_df['percent_change_classification'].value_counts())
-    print("Leg direction class distribution:")
-    print(train_df['leg_direction'].value_counts())
-
-    # Compute weights for focal loss alpha
-    percent_weights = compute_class_weights(train_df, 'percent_change_classification').to(device)
-    leg_weights = compute_class_weights(train_df, 'leg_direction').to(device)
-
-    train_dataset = CryptoDataset(train_df, feature_cols, window_size)
-    val_dataset = CryptoDataset(val_df, feature_cols, window_size)
-    test_dataset = CryptoDataset(test_df, feature_cols, window_size)
-
-    # Prepare WeightedRandomSampler
-    # Get targets for weighted sampler
-    targets = []
-    for i in range(len(train_dataset)):
-        _, (pct, _) = train_dataset[i]
-        targets.append(int(pct))
-    targets = np.array(targets)
-    class_sample_counts = np.bincount(targets)
-    weight_for_each_class = 1.0 / class_sample_counts
-    samples_weight = torch.from_numpy(weight_for_each_class[targets]).double()
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-
-    num_features = len(feature_cols)
-    num_cryptos = full_df['crypto'].nunique()
-    num_classes = full_df['percent_change_classification'].nunique()
-
-    model = ShortTermTransformerModel(
-        num_features=num_features,
-        num_cryptos=num_cryptos,
-        d_model=128,
-        nhead=8,
-        num_encoder_layers=4,
-        dim_feedforward=128,
-        num_classes=num_classes,
-        max_seq_length=window_size
-    ).to(device)
-
-    # Using FocalLoss
-    percent_focal_loss = FocalLoss(alpha=percent_weights, gamma=1.0)
-    leg_focal_loss = FocalLoss(alpha=leg_weights, gamma=1.0)
-
-    criterion_dict = {
-        'percent_ce': percent_focal_loss,
-        'leg_ce': leg_focal_loss
-    }
-
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.0001)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-    scaler = torch.cuda.amp.GradScaler()
-
-    best_val_loss = float('inf')
-    best_model_state = None
-    patience_counter = 0
-    early_stopping_patience = 15
-
-    for epoch in range(epochs):
-        print(f"\nEpoch {epoch + 1}/{epochs}")
-        train_losses, train_metrics = train(model, train_loader, criterion_dict, optimizer, scheduler, scaler, device, accumulation_steps=2)
-        print(f"Training - Losses: {train_losses}")
-        print(f"Training - Metrics: {train_metrics}")
-
-        val_losses, val_metrics = validate(model, val_loader, criterion_dict, device)
-        print(f"Validation - Losses: {val_losses}")
-        print(f"Validation - Metrics: {val_metrics}")
-
-        # Update scheduler based on validation total loss
-        scheduler.step(val_losses["total"])
-
-        # Early stopping
-        if val_losses["total"] < best_val_loss:
-            best_val_loss = val_losses["total"]
-            best_model_state = model.state_dict().copy()
-            patience_counter = 0
-            print(f"New best model saved with validation loss: {best_val_loss:.4f}")
-        else:
-            patience_counter += 1
-            if patience_counter > early_stopping_patience:
-                print("Early stopping triggered.")
-                break
-
-        gc.collect()
-
-    # Save the best model
-    if best_model_state is not None:
-        torch.save(best_model_state, 'best_short_term_transformer_model.pth')
-        print("Best model saved as best_short_term_transformer_model.pth")
-    else:
-        print("No improvement during training, model not saved.")
-
-    # Final evaluation
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    test_losses, test_metrics = validate(model, test_loader, criterion_dict, device)
-    print("\nFinal Test Results:")
-    print(f"Test Losses: {test_losses}")
-    print(f"Test Metrics: {test_metrics}")
-
-def preprocess_and_predict():
-    """
-    Fetch latest data, preprocess it, and use the model to make predictions.
-    Stores predictions separately without altering the original full_df.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Step 1: Fetch latest data
-    print("Fetching latest data...")
-    collect("2024-09-01", "2024-11-02")
-
-    # Step 2: Preprocess the data
-    print("Preprocessing the data...")
-    preprocess()
-
-    # Step 3: Load the trained model
-    print("Loading the model...")
-
-    preprocessed_data_dir = 'preprocessed_data'
-    dfs = []
-    for ticker in os.listdir(preprocessed_data_dir):
-        ticker_dir = os.path.join(preprocessed_data_dir, ticker)
-        if os.path.isdir(ticker_dir):
-            for file in os.listdir(ticker_dir):
-                if file.endswith('_preprocessed.csv'):
-                    filepath = os.path.join(ticker_dir, file)
-                    df = pd.read_csv(filepath)
-                    df['crypto'] = ticker
-                    dfs.append(df)
-
-    if not dfs:
-        print("No preprocessed data found. Exiting prediction.")
-        return { "status": "failure", "message": "No preprocessed data available for prediction." }
-
-    full_df = pd.concat(dfs, ignore_index=True)
-    print("::full_df:")
-    print(full_df.head())
-
-    target_cols = ['percent_change_classification', 'leg_direction']
-    feature_cols = [col for col in full_df.columns if col not in target_cols + ['t', 'crypto']]
-
-    # Drop NaN
-    full_df.dropna(subset=feature_cols + target_cols, inplace=True)
-
-    full_df = full_df.sort_values('t').reset_index(drop=True)  # Ensure data is sorted by time
-
-    # Load the model
-    num_features = len(feature_cols)
-    num_cryptos = full_df['crypto'].nunique()
-    num_classes = full_df['percent_change_classification'].nunique()
-
-    model = ShortTermTransformerModel(
-        num_features=num_features,
-        num_cryptos=num_cryptos,
-        d_model=128,
-        nhead=8,
-        num_encoder_layers=4,
-        dim_feedforward=128,
-        num_classes=num_classes,
-        max_seq_length=80  # Assuming window_size=80
-    ).to(device)
-
-    try:
-        # Specify map_location to ensure compatibility with the device
-        model.load_state_dict(torch.load('best_short_term_transformer_model.pth', map_location=device))
-        model.eval()
-        print("Model loaded successfully.")
-    except Exception as e:
-        print(f"Error loading the model: {e}")
-        return { "status": "failure", "message": "Model loading failed." }
-
-    # Step 4: Prepare data for prediction
-    print("Preparing data for prediction...")
-    # Ensure 'crypto' and 't' columns are present
-    if 'crypto' not in full_df.columns or 't' not in full_df.columns:
-        print("Error: 'crypto' and/or 't' columns are missing from the preprocessed data.")
-        return { "status": "failure", "message": "'crypto' and/or 't' columns are missing from the preprocessed data." }
-
-    scaler = joblib.load('scaler.joblib')  # Load the scaler
-    full_df[feature_cols] = scaler.transform(full_df[feature_cols])
-
-    # Initialize an empty list to collect all predictions
-    predictions_list = []
-
-    # Iterate over each unique cryptocurrency
-    for crypto in tqdm(full_df['crypto'].unique(), desc="Processing Cryptocurrencies"):
-        # Filter data for the current crypto
-        crypto_df = full_df[full_df['crypto'] == crypto].reset_index(drop=True)
-
-        # Initialize the dataset and dataloader for the current crypto
-        crypto_dataset = CryptoDataset(crypto_df, feature_cols, window_size=80)
-        crypto_loader = DataLoader(crypto_dataset, batch_size=48, shuffle=False, num_workers=2)
-
-        # Initialize lists to store predictions and corresponding timestamps
-        percent_change_predictions = []
-        leg_direction_predictions = []
-        prediction_timestamps = []
-
-        with torch.no_grad():
-            for (inputs, crypto_ids), _ in tqdm(crypto_loader, desc=f"Predicting for {crypto}", leave=False):
-                inputs = inputs.to(device)
-                crypto_ids = crypto_ids.to(device)
-                percent_probs, leg_probs = model(inputs, crypto_ids)
-
-                # Convert logits to predictions
-                percent_pred = torch.argmax(percent_probs, dim=1).cpu().tolist()
-                leg_pred = torch.argmax(leg_probs, dim=1).cpu().tolist()
-
-                percent_change_predictions.extend(percent_pred)
-                leg_direction_predictions.extend(leg_pred)
-
-                # Calculate corresponding timestamps
-                # Each prediction corresponds to the row immediately after the window
-                start_index = len(percent_change_predictions) - len(percent_pred)
-                end_index = start_index + len(percent_pred)
-                corresponding_timestamps = crypto_df['t'].iloc[start_index + 80:end_index + 80].tolist()
-
-                prediction_timestamps.extend(corresponding_timestamps)
-
-        # Create a DataFrame for the current crypto's predictions
-        crypto_predictions_df = pd.DataFrame({
-            't': prediction_timestamps,
-            'crypto': [crypto] * len(percent_change_predictions),
-            'percent_change_prediction': percent_change_predictions,
-            'leg_direction_prediction': leg_direction_predictions
-        })
-
-        # Append to the main predictions list
-        predictions_list.append(crypto_predictions_df)
-
-    # Concatenate all predictions into a single DataFrame
-    predictions_df = pd.concat(predictions_list, ignore_index=True)
-
-    # Save predictions separately
-    os.makedirs('predictions', exist_ok=True)
-    predictions_df.to_csv('predictions/latest_predictions.csv', index=False)
-    print("Predictions saved to 'predictions/latest_predictions.csv'.")
-    print(predictions_df)
-    predictions_dict = predictions_df.to_dict(orient="records")
-    if len(predictions_dict) > 100:
-        predictions_dict = predictions_dict[-100:]
-    return {"status": "success", "predictions": predictions_dict}
-
-
-def handler(job):
-    # Access the input data from the job
-    job_input = job.get("input", {})
-    
-    # Retrieve the 'START_DATE' and 'END_DATE' values
-    START_DATE = job_input.get("START_DATE", "")
-    print(f"START_DATE :  {START_DATE}")
-    END_DATE = job_input.get("END_DATE", "")
-    print(f"END_DATE :  {END_DATE}")
-
-    
-    # Implement your processing logic using 'start_date' and 'end_date'
-
-    collect(START_DATE, END_DATE)
-    preprocess()
-    main()
-    prediction_result = preprocess_and_predict()
-    return prediction_result
+# =========================
+# Main Execution
+# =========================
 
 runpod.serverless.start({"handler": handler})
