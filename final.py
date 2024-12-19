@@ -507,14 +507,8 @@ def main(crypto_metrics):
         del model
         torch.cuda.empty_cache()
 
-def preprocess_and_predict(TICKERS):
-    collect(START_DATE, END_DATE, TICKERS, TIMEFRAMES)
-    preprocess = CryptoDataPreprocessor(
-        raw_data_dir='crypto_data',
-        preprocessed_data_dir='preprocessed_data',
-        columns_to_add=['close_price', 't']
-    )
-    preprocess.preprocess_all_files()
+def preprocess_and_predict():
+   
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     preprocessed_data_dir = 'preprocessed_data'
@@ -929,12 +923,12 @@ def handler(job):
     job_input = job.get("input", {})
     
     # Retrieve the 'START_DATE' and 'END_DATE' values
-    START_DATE = job_input.get("START_DATE", "")
-    print(f"START_DATE :  {START_DATE}")
-    END_DATE = job_input.get("END_DATE", "")
-    print(f"END_DATE :  {END_DATE}")
+    START_DATE1 = job_input.get("START_DATE1", "")
+    print(f"START_DATE1 :  {START_DATE1}")
+    END_DATE1 = job_input.get("END_DATE1", "")
+    print(f"END_DATE1 :  {END_DATE1}")
 
-    collect(START_DATE, END_DATE)
+    collect(START_DATE1, END_DATE1)
     # Uncomment if you want to run these steps
     preprocess = CryptoDataPreprocessor(
          raw_data_dir='crypto_data',
@@ -946,8 +940,21 @@ def handler(job):
     crypto_metrics = {}
     main(crypto_metrics)
 
+    START_DATE2 = job_input.get("START_DATE2", "")
+    print(f"START_DATE2 :  {START_DATE2}")
+    END_DATE2 = job_input.get("END_DATE2", "")
+    print(f"END_DATE2 :  {END_DATE2}")
+
+    collect(START_DATE2, END_DATE2)
+    preprocess = CryptoDataPreprocessor(
+        raw_data_dir='crypto_data',
+        preprocessed_data_dir='preprocessed_data',
+        columns_to_add=['close_price', 't']
+    )
+    preprocess.preprocess_all_files()
+
     # Step 2: Predictions
-    prediction_status = preprocess_and_predict(TICKERS)
+    prediction_status = preprocess_and_predict()
     if prediction_status["status"] != "success":
         logging.error("Prediction step failed. Exiting.")
         metrics_dict["status"] = "failed"
