@@ -669,6 +669,31 @@ def preprocess_and_predict(crypto_metrics):
 
     return {"status": "success", "message": "Predictions completed."}
 
+
+
+
+def upload_to_transfersh(file_path):
+    """
+    Uploads a file to Transfer.sh and returns the download URL.
+
+    Args:
+        file_path (str): The path to the file to be uploaded.
+
+    Returns:
+        str: The download URL of the uploaded file.
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            filename = os.path.basename(file_path)
+            response = requests.put(f'https://transfer.sh/{filename}', data=f)
+            response.raise_for_status()
+            return response.text.strip()
+    except Exception as e:
+        logging.error(f"Failed to upload {file_path} to Transfer.sh: {e}")
+        return None
+
+
+
 def handler(job):
     job_input = job.get("input", {})
     
@@ -722,11 +747,20 @@ def handler(job):
         return json.dumps(metrics_dict)  # Ensure handler exits after failure
 
     predictions_df = pd.read_csv(all_predictions_path)
-
-    # Step 6: Aggregate Metrics
+    
+    download_link = upload_to_transfersh(all_predictions_path)
+    if not download_link:
+        metrics_dict["status"] = "failed"
+        metrics_dict["message"] = "Failed to upload the predictions CSV."
+        return json.dumps(metrics_dict)
+    
+    
+    metrics_dict["download_link"] = download_link
+    
     metrics_dict["status"] = "success"
     metrics_dict["message"] = "Processing completed successfully."
     metrics_dict["details"] = crypto_metrics
+    
     return json.dumps(metrics_dict)
 
 def set_seed(seed=42):
