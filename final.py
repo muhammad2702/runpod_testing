@@ -21,7 +21,6 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import joblib
 import logging
-from backtesting import Backtest, Strategy
 from itertools import product
 import json  # For JSON serialization
 import sys   # To read input from stdin
@@ -369,8 +368,7 @@ def main(crypto_metrics):
         crypto_metrics[crypto] = {
             "training_losses": [],
             "validation_losses": [],
-            "test_metrics": {},
-            "backtest_results": {}
+            "test_metrics": {}
         }
 
         # Load preprocessed CSV files for this crypto
