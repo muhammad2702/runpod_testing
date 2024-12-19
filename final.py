@@ -368,7 +368,8 @@ def main(crypto_metrics):
         crypto_metrics[crypto] = {
             "training_losses": [],
             "validation_losses": [],
-            "test_metrics": {}
+            "test_metrics": {},
+            "prediction_metrics": {}  # Added to store prediction metrics
         }
 
         # Load preprocessed CSV files for this crypto
@@ -505,7 +506,7 @@ def main(crypto_metrics):
         del model
         torch.cuda.empty_cache()
 
-def preprocess_and_predict():
+def preprocess_and_predict(crypto_metrics):
    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -616,6 +617,20 @@ def preprocess_and_predict():
 
         print(f"Prediction MAE for {crypto}: {mae:.4f}, RMSE: {rmse:.4f}")
 
+        # Store prediction metrics
+        if crypto in crypto_metrics:
+            crypto_metrics[crypto]["prediction_metrics"] = {
+                "mae": mae,
+                "rmse": rmse
+            }
+        else:
+            crypto_metrics[crypto] = {
+                "prediction_metrics": {
+                    "mae": mae,
+                    "rmse": rmse
+                }
+            }
+
         # Add classification columns
         last_actual_close = true_close_prices
         predictions_df['direction'] = np.where(predictions_df['predicted_close_price'] > last_actual_close, 'Up', 'Down')
@@ -689,12 +704,13 @@ def handler(job):
     preprocess.preprocess_all_files()
 
     # Step 2: Predictions
-    prediction_status = preprocess_and_predict()
+    prediction_status = preprocess_and_predict(crypto_metrics)  # Pass crypto_metrics to collect prediction metrics
     if prediction_status["status"] != "success":
         logging.error("Prediction step failed. Exiting.")
         metrics_dict["status"] = "failed"
         metrics_dict["message"] = "Prediction step failed."
         print(json.dumps(metrics_dict))
+        return json.dumps(metrics_dict)  # Ensure handler exits after failure
 
     # Step 3: Load the combined predictions
     all_predictions_path = os.path.join(PREDICTIONS_DIR, 'all_latest_predictions.csv')
@@ -703,19 +719,15 @@ def handler(job):
         metrics_dict["status"] = "failed"
         metrics_dict["message"] = f"Combined predictions file not found at {all_predictions_path}."
         print(json.dumps(metrics_dict))
+        return json.dumps(metrics_dict)  # Ensure handler exits after failure
 
     predictions_df = pd.read_csv(all_predictions_path)
-    metrics_dict["preds"] = predictions_df.to_dict(orient='records')
- 
 
     # Step 6: Aggregate Metrics
     metrics_dict["status"] = "success"
     metrics_dict["message"] = "Processing completed successfully."
     metrics_dict["details"] = crypto_metrics
     return json.dumps(metrics_dict)
-
-
-    
 
 def set_seed(seed=42):
     random.seed(seed)
