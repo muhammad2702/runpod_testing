@@ -705,7 +705,7 @@ def handler(job):
         print(json.dumps(metrics_dict))
 
     predictions_df = pd.read_csv(all_predictions_path)
-    metrics_dict["preds"] = predictions_df
+    metrics_dict["preds"] = predictions_df.to_dict(orient='records')
  
 
     # Step 6: Aggregate Metrics
