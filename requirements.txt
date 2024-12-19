@@ -9,4 +9,4 @@ ta
 tqdm
 pickle-mixin  # For pickle functionality
 joblib
-
+backtesting
