@@ -672,24 +672,17 @@ def preprocess_and_predict(crypto_metrics):
 
 
 
-def upload_to_transfersh(file_path):
-    """
-    Uploads a file to Transfer.sh and returns the download URL.
-
-    Args:
-        file_path (str): The path to the file to be uploaded.
-
-    Returns:
-        str: The download URL of the uploaded file.
-    """
+def upload_to_oshi(file_path):
     try:
-        with open(file_path, 'rb') as f:
-            filename = os.path.basename(file_path)
-            response = requests.put(f'https://transfer.sh/{filename}', data=f)
+        with open(file_path, 'rb') as file:
+            files = {'f': file}
+            response = requests.post('https://oshi.at', files=files)
             response.raise_for_status()
-            return response.text.strip()
+            # Extract the download link from the response text
+            download_link = response.text.strip()
+            return download_link
     except Exception as e:
-        logging.error(f"Failed to upload {file_path} to Transfer.sh: {e}")
+        print(f"An error occurred during file upload: {e}")
         return None
 
 
@@ -747,15 +740,14 @@ def handler(job):
         return json.dumps(metrics_dict)  # Ensure handler exits after failure
 
     predictions_df = pd.read_csv(all_predictions_path)
-    
-    download_link = upload_to_transfersh(all_predictions_path)
+    download_link = upload_to_oshi(all_predictions_path)
     if not download_link:
         metrics_dict["status"] = "failed"
         metrics_dict["message"] = "Failed to upload the predictions CSV."
         return json.dumps(metrics_dict)
-    
-    
+        
     metrics_dict["download_link"] = download_link
+
     
     metrics_dict["status"] = "success"
     metrics_dict["message"] = "Processing completed successfully."
