@@ -740,11 +740,10 @@ def handler(job):
         return json.dumps(metrics_dict)  # Ensure handler exits after failure
 
     predictions_df = pd.read_csv(all_predictions_path)
+    print(predictions_df)
     download_link = upload_to_oshi(all_predictions_path)
-    if not download_link:
-        metrics_dict["status"] = "failed"
-        metrics_dict["message"] = "Failed to upload the predictions CSV."
-        return json.dumps(metrics_dict)
+    print(download_link)
+   
         
     metrics_dict["download_link"] = download_link
 
